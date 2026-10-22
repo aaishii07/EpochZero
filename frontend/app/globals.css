@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+/* Design tokens. Flat colors only: no gradients, no glows, no shadows. */
+:root {
+  --bg: #0e1116;
+  --surface: #161b22;
+  --surface-raised: #1c2230;
+  --border: #2a313c;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --accent: #4c8dff;
+  --accent-text: #ffffff;
+  --crash: #f85149;
+  --silent: #d29922;
+  --risk: #8b949e;
+  --resolved: #3fb950;
+  --unresolved: #f85149;
+  --inconclusive: #d29922;
+}
+
+@theme inline {
+  --color-canvas: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--surface-raised);
+  --color-line: var(--border);
+  --color-ink: var(--text);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--accent-text);
+  --color-crash: var(--crash);
+  --color-silent: var(--silent);
+  --color-risk: var(--risk);
+  --color-resolved: var(--resolved);
+  --color-unresolved: var(--unresolved);
+  --color-inconclusive: var(--inconclusive);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button,
+a,
+input,
+textarea,
+select {
+  transition-property: color, background-color, border-color, opacity;
+  transition-duration: 150ms;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+}
+
+/* Indeterminate progress: a solid block sliding across a solid track. */
+.ez-progress {
+  position: relative;
+  height: 2px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.ez-progress::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+  background: var(--accent);
+  animation: ez-slide 1.2s linear infinite;
+}
+@keyframes ez-slide {
+  from {
+    left: -30%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+/* Monaco line decoration for the selected finding. */
+.ez-selected-line {
+  background: var(--surface-raised);
+}
+.ez-selected-glyph {
+  background: var(--accent);
+  width: 3px !important;
+  margin-left: 3px;
+}
