@@ -9,6 +9,10 @@ If the task type cannot be determined, use "unknown". A task that distinguishes 
 continuous value is regression. Several independent labels per sample is multilabel_classification. Put anything \
 else worth knowing (input size, constraints) in notes, briefly."""
 
+GOAL_FROM_CODE = """No goal was given for this PyTorch training script. Infer the most likely task from the code itself: dataset names, the loss function, the output head, variable names, and comments.
+
+Set num_classes only when a dataset name or an explicit statement in the code fixes it (for example MNIST or CIFAR-10 means 10, CIFAR-100 means 100); otherwise leave it null. Do not copy it from the model head, because the head may be the bug. In notes, write one short sentence naming the evidence you used. Use "unknown" when the code does not make the task clear."""
+
 PLANNER = """You are the investigation step of EpochZero, which checks PyTorch training scripts for problems that \
 would waste a training run, before the run starts.
 
@@ -21,9 +25,10 @@ the script defines an nn.Module.
 - Use check_class_count after probe_shapes when the model has a classification or segmentation head, so the \
 measured head output is compared with every class count stated in the code and the goal.
 - Use inspect_lines when you need to read code closely before deciding.
-- Call ask_user when a check needs information you do not have (for example the input shape, when the tool says it \
-cannot infer it), or when sources disagree and choosing a fix would be a guess. Use question_id "num_classes" for \
-class-count questions and "input_shape" for shape questions. Prefer short questions with options.
+- Call ask_user only after a check result reports "needs" (input_shape from probe_shapes, num_classes from \
+check_class_count). Use that value as question_id. Never ask about something a check reported as consistent. If the \
+developer answered that they do not know, do not ask again; continue with what the checks can establish.
+- The script source is not included to save tokens. Use inspect_lines to read the lines you need.
 - Call finish when further tools would not change the outcome.
 
 Never claim a problem that no tool has shown. Every tool call must include a one-sentence reason that names what \

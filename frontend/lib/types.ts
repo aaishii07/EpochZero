@@ -71,12 +71,20 @@ export interface Coverage {
   skipped: SkippedCheck[];
 }
 
+export interface GoalProfile {
+  task: string;
+  num_classes: number | null;
+  modality: string;
+  notes: string;
+}
+
 export type Phase = "parse" | "context" | "baseline" | "plan" | "repair" | "verify" | "report";
 
 export type AgentEvent =
   | { type: "step"; phase: Phase; message: string }
   | { type: "tool_call"; tool: string; args: Record<string, unknown>; reason: string }
   | { type: "tool_result"; tool: string; ok: boolean; summary: string; finding_ids: string[] }
+  | { type: "goal"; profile: GoalProfile; inferred: boolean; summary: string }
   | { type: "finding"; finding: Finding }
   | { type: "attempt"; finding_id: string; attempt: number; status: VerifyStatus; detail: string }
   | { type: "suggestion"; suggestion: Suggestion }

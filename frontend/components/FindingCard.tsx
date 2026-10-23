@@ -8,11 +8,13 @@ interface Props {
   selected: boolean;
   onSelect: () => void;
   onViewPatch: () => void;
+  canApply: boolean;
+  onApply: () => void;
 }
 
 const BORDER = { crash: "border-l-crash", silent: "border-l-silent", risk: "border-l-risk" };
 
-export default function FindingCard({ finding, suggestion, repairing, selected, onSelect, onViewPatch }: Props) {
+export default function FindingCard({ finding, suggestion, repairing, selected, onSelect, onViewPatch, canApply, onApply }: Props) {
   const body = suggestion?.explanation || finding.message;
   return (
     <article
@@ -67,16 +69,38 @@ export default function FindingCard({ finding, suggestion, repairing, selected, 
         </div>
       )}
       {suggestion?.patch && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onViewPatch();
-          }}
-          className="mt-3 h-7 rounded-md border border-line px-2.5 text-xs text-ink hover:bg-canvas"
-        >
-          View patch
-        </button>
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={!canApply}
+            onClick={(e) => {
+              e.stopPropagation();
+              onApply();
+            }}
+            title={suggestion.verify_status === "unresolved" ? "This patch did not pass verification. Applying it re-checks the script." : undefined}
+            className={
+              suggestion.verify_status === "unresolved"
+                ? "h-7 rounded-md border border-crash px-2.5 text-xs text-crash hover:bg-canvas disabled:opacity-50"
+                : "h-7 rounded-md bg-accent px-2.5 text-xs font-medium text-on-accent hover:opacity-90 disabled:bg-raised disabled:text-muted"
+            }
+          >
+            {suggestion.verify_status === "unresolved"
+              ? "Apply anyway"
+              : suggestion.verify_status === "inconclusive"
+                ? "Apply unverified fix"
+                : "Apply fix"}
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onViewPatch();
+            }}
+            className="h-7 rounded-md border border-line px-2.5 text-xs text-ink hover:bg-canvas"
+          >
+            View patch
+          </button>
+        </div>
       )}
     </article>
   );

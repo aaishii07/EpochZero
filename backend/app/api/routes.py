@@ -27,7 +27,7 @@ def analyze(req: AnalyzeRequest):
 def health():
     import torch
 
-    return {"status": "ok", "llm": config.LLM_MODE, "model": config.MODEL, "torch": torch.__version__}
+    return {"status": "ok", "llm": config.LLM_MODE, "provider": "groq", "model": config.MODEL, "torch": torch.__version__}
 
 
 @router.get("/rules")

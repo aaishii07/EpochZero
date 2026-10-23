@@ -43,6 +43,41 @@ def read_goal(goal: str) -> GoalProfile:
     return GoalProfile(task=task, num_classes=num, modality=modality)
 
 
+def infer_goal(facts) -> GoalProfile:
+    """Offline guess at the task from the code alone (used when no goal is given)."""
+    loss = facts.loss.type if facts.loss else None
+    dataset = facts.data_hints.get("dataset") or {}
+    head = facts.head
+    spatial_head = head is not None and head.type in {"Conv2d", "ConvTranspose2d", "Conv3d"}
+    evidence = []
+    if loss:
+        evidence.append(loss)
+    if dataset:
+        evidence.append(f"{dataset['name']} dataset")
+    if loss in {"CrossEntropyLoss", "NLLLoss"}:
+        task = "segmentation" if spatial_head else "multiclass_classification"
+    elif loss in {"BCEWithLogitsLoss", "BCELoss"}:
+        task = "binary_classification" if facts.head_out in (None, 1) else "multilabel_classification"
+    elif loss in {"MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss"}:
+        task = "regression"
+    else:
+        task = "unknown"
+    if spatial_head and task == "segmentation":
+        evidence.append("convolutional output head")
+    first = (facts.data_hints.get("first_layer") or {}).get("type", "")
+    if first.startswith("Conv") or dataset:
+        modality = "image"
+    elif first in {"Embedding", "LSTM", "GRU"}:
+        modality = "text"
+    else:
+        modality = "tabular" if first == "Linear" else "unknown"
+    num = dataset.get("num_classes") if task in {"multiclass_classification", "segmentation"} else None
+    if task == "binary_classification":
+        num = 2
+    notes = ("Inferred from " + ", ".join(evidence)) if evidence else "No clear signal in the code"
+    return GoalProfile(task=task, num_classes=num, modality=modality, notes=notes)
+
+
 def plan_steps(has_model: bool, has_head: bool, task: str) -> list[str]:
     """Fixed investigation order used when the planner LLM is unavailable."""
     steps = []

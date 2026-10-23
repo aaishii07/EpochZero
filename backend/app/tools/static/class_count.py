@@ -37,7 +37,7 @@ def run(ctx: ToolContext) -> ToolResult:
 
     sources = [{"kind": s.kind, "value": s.value, "line": s.line, "detail": s.detail}
                for s in f.class_count_sources if s.kind != "head"]
-    if profile.num_classes:
+    if profile.num_classes and not ctx.goal_inferred:
         sources.append({"kind": "goal", "value": profile.num_classes, "line": None, "detail": f"goal states {profile.num_classes} classes"})
     user = _int(ctx.answers.get("num_classes"))
     if user:
@@ -48,12 +48,14 @@ def run(ctx: ToolContext) -> ToolResult:
 
     if not sources:
         return ToolResult(True, f"Head outputs {head_value}; no other class-count source to compare", data=data)
+    if all(s["value"] == head_value for s in sources):
+        return ToolResult(True, f"All {len(all_sources)} class-count sources agree on {head_value}", data=data)
 
     if user:
         target, status = user, "grounded"
     else:
         counts = Counter(s["value"] for s in sources)
-        goal_value = profile.num_classes
+        goal_value = None if ctx.goal_inferred else profile.num_classes
         (top, top_n), *rest = counts.most_common()
         clear_majority = not rest or top_n > rest[0][1]
         if goal_value and (counts.get(goal_value, 0) >= max(counts.values()) or len(counts) == 1):
@@ -80,7 +82,8 @@ def run(ctx: ToolContext) -> ToolResult:
             primary["line"],
             [Evidence(tool=TOOL, summary=f"{len(agreeing)} sources agree on {target}; {KIND_LABEL[primary['kind']]} says {primary['value']}",
                       lines=sorted({s["line"] for s in all_sources if s["line"]}), data={**data, "target_value": target, "fix_kind": primary["kind"]})]
-            + ([Evidence(tool="shape_probe", summary=f"Measured model output {tuple(measured)}", data={"output_shape": measured})] if measured else []),
+            + ([Evidence(tool="shape_probe", summary=f"Measured model output {tuple(measured)}",
+                         data={"output_shape": measured, "input_shape": ctx.measured.get("input_shape")})] if measured else []),
             impact="crash" if crash else "silent",
         )
         return ToolResult(True, f"Class count mismatch: {primary['kind']} says {primary['value']}, grounded value is {target}",
@@ -96,7 +99,12 @@ def run(ctx: ToolContext) -> ToolResult:
                   lines=sorted({s["line"] for s in all_sources if s["line"]}), data=data)],
         patchable=False,
     )
-    options = sorted({str(s["value"]) for s in all_sources})
+    if "num_classes" in ctx.answers:
+        # Already asked. The developer did not know (or gave something unusable), so report without asking again.
+        finding.message += " You did not give the intended number, so nothing was changed; fix it once you know."
+        return ToolResult(True, "Class-count sources conflict; left unchanged because the intended count is unknown",
+                          findings=[finding], data=data)
+    options = sorted({str(s["value"]) for s in all_sources}, key=lambda v: int(v))
     return ToolResult(True, "Class-count sources conflict; developer input needed", findings=[finding], data={**data, "options": options},
                       needs="num_classes", question=question)
 

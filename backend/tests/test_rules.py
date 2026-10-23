@@ -167,3 +167,9 @@ def test_apply_patch():
     assert apply_patch(code, Patch(start_line=2, end_line=2, replacement="")) == "a\nc\n"
     with pytest.raises(PatchError):
         apply_patch(code, Patch(start_line=5, end_line=6, replacement="x"))
+
+
+def test_is_unknown():
+    from app.tools.base import is_unknown
+    assert all(is_unknown(v) for v in ["Don't know", "dont know", "I don't know.", "unknown", "?", "Not sure"])
+    assert not any(is_unknown(v) for v in ["5", "1,3,224,224", None])

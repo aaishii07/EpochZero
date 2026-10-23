@@ -97,7 +97,7 @@ PSEUDO_TOOLS = [
 
 def as_llm_tools() -> list[dict]:
     tools = [{"name": n, "description": t["description"], "input_schema": t["schema"]} for n, t in TOOLS.items()]
-    return [{**t, "strict": True} for t in tools + PSEUDO_TOOLS]
+    return tools + PSEUDO_TOOLS
 
 
 def run_tool(name: str, ctx: ToolContext, **args) -> ToolResult:

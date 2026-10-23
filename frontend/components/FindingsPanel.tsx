@@ -10,6 +10,10 @@ interface Props {
   done: boolean;
   onSelect: (id: string) => void;
   onViewPatch: (id: string) => void;
+  canApply: (id: string) => boolean;
+  onApply: (id: string) => void;
+  verifiedCount: number;
+  onApplyAll: () => void;
 }
 
 const GROUPS: { impact: Impact; label: string }[] = [
@@ -18,7 +22,9 @@ const GROUPS: { impact: Impact; label: string }[] = [
   { impact: "risk", label: "Risk" },
 ];
 
-export default function FindingsPanel({ findings, suggestions, repairing, selectedId, hasRun, done, onSelect, onViewPatch }: Props) {
+export default function FindingsPanel({
+  findings, suggestions, repairing, selectedId, hasRun, done, onSelect, onViewPatch, canApply, onApply, verifiedCount, onApplyAll,
+}: Props) {
   if (!hasRun) {
     return <Empty text="Paste a training script, describe your goal, and press Check." />;
   }
@@ -27,6 +33,20 @@ export default function FindingsPanel({ findings, suggestions, repairing, select
   }
   return (
     <div className="space-y-5 p-4">
+      {verifiedCount > 1 && (
+        <div className="flex items-center gap-3 rounded-md border border-line bg-surface p-3">
+          <p className="flex-1 text-[13px] text-muted">
+            {verifiedCount} fixes passed verification. Apply them together, then EpochZero checks the result again.
+          </p>
+          <button
+            type="button"
+            onClick={onApplyAll}
+            className="h-8 shrink-0 rounded-md bg-accent px-3 text-sm font-medium text-on-accent hover:opacity-90"
+          >
+            Apply all {verifiedCount}
+          </button>
+        </div>
+      )}
       {GROUPS.map(({ impact, label }) => {
         const items = findings.filter((f) => f.impact === impact).sort((a, b) => a.line - b.line);
         if (!items.length) return null;
@@ -45,6 +65,8 @@ export default function FindingsPanel({ findings, suggestions, repairing, select
                   selected={selectedId === f.id}
                   onSelect={() => onSelect(f.id)}
                   onViewPatch={() => onViewPatch(f.id)}
+                  canApply={canApply(f.id)}
+                  onApply={() => onApply(f.id)}
                 />
               ))}
             </div>

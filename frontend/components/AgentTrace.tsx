@@ -117,6 +117,8 @@ function describe(e: AgentEvent): { label: string; tone: string; text: React.Rea
           </span>
         ),
       };
+    case "goal":
+      return null; // the context step already describes the goal
     case "suggestion":
       return null;
     case "needs_input":

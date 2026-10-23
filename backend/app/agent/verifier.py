@@ -16,7 +16,10 @@ from app.tools.registry import run_tool, tools_for_findings
 
 
 def run_checks(code: str, profile: GoalProfile, input_shape, answers, tools: list[str]) -> tuple[Counter, list[str]]:
-    """Returns rule-id counts and the list of reasons any tool could not run."""
+    """Returns rule-id counts and the list of reasons any tool could not run.
+
+    input_shape must be the shape the finding was measured with, so before and after are compared on the same input.
+    """
     ctx = ToolContext(code=code, facts=build_facts(code), profile=profile, input_shape=input_shape, answers=answers)
     counts: Counter = Counter()
     problems: list[str] = []
@@ -28,6 +31,15 @@ def run_checks(code: str, profile: GoalProfile, input_shape, answers, tools: lis
     return counts, problems
 
 
+def measured_shape(finding: Finding) -> list[int] | None:
+    """The input shape the shape probe used when it produced (or supported) this finding."""
+    for ev in finding.evidence:
+        shape = ev.data.get("input_shape")
+        if isinstance(shape, list) and shape and all(isinstance(d, int) for d in shape):
+            return shape
+    return None
+
+
 class Verifier:
     def __init__(self, original: str, profile: GoalProfile, input_shape, answers):
         self.original = original
@@ -36,10 +48,10 @@ class Verifier:
         self.answers = answers
         self._baseline: dict[tuple, tuple[Counter, list[str]]] = {}
 
-    def _before(self, tools: list[str]):
-        key = tuple(tools)
+    def _before(self, tools: list[str], shape):
+        key = (tuple(tools), tuple(shape or ()))
         if key not in self._baseline:
-            self._baseline[key] = run_checks(self.original, self.profile, self.input_shape, self.answers, tools)
+            self._baseline[key] = run_checks(self.original, self.profile, shape, self.answers, tools)
         return self._baseline[key]
 
     def verify(self, patch: Patch, finding: Finding) -> tuple[VerifyStatus, str]:
@@ -55,8 +67,9 @@ class Verifier:
         tools = tools_for_findings({ev.tool for ev in finding.evidence})
         if not tools:
             return "inconclusive", "No check can reproduce this finding"
-        before, _ = self._before(tools)
-        after, problems = run_checks(patched, self.profile, self.input_shape, self.answers, tools)
+        shape = measured_shape(finding) or self.input_shape
+        before, _ = self._before(tools, shape)
+        after, problems = run_checks(patched, self.profile, shape, self.answers, tools)
 
         if after[finding.rule_id] >= before[finding.rule_id]:
             if problems:

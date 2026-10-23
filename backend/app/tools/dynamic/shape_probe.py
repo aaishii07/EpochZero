@@ -7,12 +7,15 @@ import re
 from app.analysis.facts import CodeFacts
 from app.sandbox.runner import run_job
 from app.schemas import Evidence, SkippedCheck
-from app.tools.base import ToolContext, ToolResult, make_finding
+from app.tools.base import ToolContext, ToolResult, is_unknown, make_finding
 
 TOOL = "shape_probe"
 MATMUL_RE = re.compile(r"mat1 and mat2 shapes cannot be multiplied \((\d+)x(\d+) and (\d+)x(\d+)\)")
 CHANNELS_RE = re.compile(r"expected input\[([\d, ]+)\] to have (\d+) channels, but got (\d+) channels")
 DATA_DEPENDENT_HINTS = ("meta", "data-dependent", "item()", "Boolean value of Tensor", "bool value of Tensor")
+
+
+ASSUMED = "assuming"  # origin prefix: the shape is a default, not something the code or the developer stated
 
 
 def resolve_input_shape(ctx: ToolContext, override: list[int] | None = None) -> tuple[list[int] | None, str, str]:
@@ -53,15 +56,17 @@ def _infer(facts: CodeFacts) -> tuple[list[int] | None, str, str]:
     if ltype in {"Conv2d", "LazyConv2d"}:
         if image:
             return [2, size_in, image[0], image[1]], "float", f"inferred from {ltype}({size_in}, ...) and image size {image[0]}x{image[1]}"
-        return [2, size_in, 224, 224], "float", f"inferred from {ltype}({size_in}, ...), assuming 224x224 images"
+        if size_in == 1:
+            return [2, 1, 28, 28], "float", f"{ASSUMED} 28x28 grayscale images, from {ltype}(1, ...)"
+        return [2, size_in, 224, 224], "float", f"{ASSUMED} 224x224 images, from {ltype}({size_in}, ...)"
     if ltype == "Conv1d":
-        return [2, size_in, 128], "float", f"inferred from Conv1d({size_in}, ...), assuming length 128"
+        return [2, size_in, 128], "float", f"{ASSUMED} sequences of length 128, from Conv1d({size_in}, ...)"
     if ltype == "Linear":
         return [2, size_in], "float", f"inferred from Linear({size_in}, ...)"
     if ltype == "Embedding":
-        return [2, 16], "long", "inferred from Embedding, assuming sequences of 16 tokens"
+        return [2, 16], "long", f"{ASSUMED} sequences of 16 tokens, from Embedding"
     if ltype in {"LSTM", "GRU", "RNN"}:
-        return [2, 16, size_in], "float", f"inferred from {ltype}({size_in}, ...), assuming batch_first sequences of 16"
+        return [2, 16, size_in], "float", f"{ASSUMED} batch_first sequences of 16, from {ltype}({size_in}, ...)"
     return None, "float", "unknown"
 
 
@@ -113,6 +118,9 @@ def run(ctx: ToolContext, input_shape: list[int] | None = None) -> ToolResult:
     if not f.model_classes:
         return ToolResult(False, "No nn.Module class found", skipped=[SkippedCheck(check="shape probe", reason="no nn.Module class found")])
     shape, dtype, origin = resolve_input_shape(ctx, input_shape)
+    if not shape and is_unknown(ctx.answers.get("input_shape")):
+        return ToolResult(False, "Input shape unknown; shape check skipped",
+                          skipped=[SkippedCheck(check="shape probe", reason="input shape unknown and could not be inferred from the code")])
     if not shape:
         return ToolResult(False, "Input shape unknown and could not be inferred", needs="input_shape",
                           question="What input shape does the model take? Give one example batch, for example 1,3,224,224.",
@@ -126,6 +134,7 @@ def run(ctx: ToolContext, input_shape: list[int] | None = None) -> ToolResult:
 
     if res.get("ok"):
         out = res.get("output")
+        ctx.measured["input_shape"] = shape
         ctx.measured["output_shape"] = out if isinstance(out, list) and all(isinstance(d, int) for d in out) else None
         ctx.measured["records"] = res.get("records", [])
         return ToolResult(True, f"Forward pass succeeded on input {tuple(shape)} ({origin}); output {out}",
@@ -155,12 +164,17 @@ def run(ctx: ToolContext, input_shape: list[int] | None = None) -> ToolResult:
         title = f"Forward pass fails at {name or 'the model'}"
         detail = {}
     in_text = f" with input shape {tuple(inp[0])}" if inp and isinstance(inp, list) and inp and isinstance(inp[0], list) else ""
+    assumed = origin.startswith(ASSUMED)
+    caveat = " This assumes the input size above; if your data has a different size, set the input shape and check again." if assumed else ""
     finding = make_finding(
         "EZ001", title,
-        f"Running the forward pass on an input of shape {tuple(shape)} ({origin}) fails at {name} ({ltype}){in_text}: {error.splitlines()[0][:240]}",
+        f"Running the forward pass on an input of shape {tuple(shape)} ({origin}) fails at {name} ({ltype}){in_text}: "
+        f"{error.splitlines()[0][:240]}{caveat}",
         line,
         [Evidence(tool=TOOL, summary=f"{ltype} {name} raised {res.get('error_type')} on input {tuple(shape)}",
                   lines=[line], data={**data, **detail, "failing_module": name, "failing_type": ltype,
                                       "failing_input": inp, "error": error[:400], "records": res.get("records", [])[-12:]})],
+        # Proven for the assumed input, not for the developer's real data.
+        **({"tier": "probed"} if assumed else {}),
     )
     return ToolResult(True, f"Shape mismatch at {name}: {title}", findings=[finding], data={**data, "error": error})

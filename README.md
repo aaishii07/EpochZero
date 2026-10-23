@@ -126,7 +126,7 @@ BACKEND (FastAPI)
         |                                         '-- sandbox/ -> subprocess running torch on meta device
         |-- agent/fixer.py            finding + evidence + docs -> explanation + patch (LLM)
         '-- agent/verifier.py         apply patch, rerun the same tool, decide status (no LLM)
-  llm/client.py  -- the only file that talks to the Claude API
+  llm/client.py  -- the only file that talks to the LLM provider (Groq)
 ```
 
 The LLM decides and writes. The tools detect and prove. No finding reaches the user without tool evidence attached, except advisory findings, which are labelled as such.
@@ -141,7 +141,7 @@ The LLM decides and writes. The tools detect and prove. No finding reaches the u
 6. **Repair.** For each patchable finding, the fixer writes a minimal line-range patch plus a short explanation, using the evidence and the rule's documentation snippet.
 7. **Verify.** The verifier applies the patch to the original code, checks it still parses, reruns the tool(s) that produced the finding, and returns `resolved`, `unresolved`, or `inconclusive`. On `unresolved`, the verifier's message goes back to the fixer. Maximum 3 attempts.
 8. **Report.** Each result streams to the frontend as a `suggestion` event, followed by a `coverage` event (what was checked, what was skipped and why) and `done`.
-9. **Approve.** The developer reviews each diff and clicks Accept or Reject. Accepting updates the editor and triggers a fresh analysis, because line numbers have changed.
+9. **Approve.** Each finding card has an Apply fix button that applies the patch in one click, plus View patch to review the diff first (Accept or Reject there). When more than one fix passed verification, an Apply all button applies them together. Applying updates the editor and triggers a fresh analysis, because line numbers have changed and the combined result must be checked again.
 
 ### 3.3 Where the agent actually makes decisions
 
@@ -168,21 +168,21 @@ The backend keeps no session state. When the planner calls `ask_user`, the orche
 | Backend | Python 3.12, FastAPI, Uvicorn, Pydantic v2 |
 | Static analysis | Python `ast` module |
 | Controlled execution | PyTorch (CPU build), `meta` device, forward hooks; `torch.fx` as stretch |
-| LLM | Claude API via the official `anthropic` Python SDK |
+| LLM | Groq API via the official `groq` Python SDK (OpenAI-compatible chat completions) |
 | Tests | pytest |
 
 ### LLM configuration
 
 | Role | Model | Effort | Output method |
 |---|---|---|---|
-| Goal reader | `claude-opus-5-5` | `low` | `client.messages.parse(output_format=GoalProfile)` |
-| Planner | `claude-opus-5-5` | `medium` | `client.messages.create(tools=..., tool_choice={"type": "auto"})`, every tool `strict: true` |
-| Fixer | `claude-opus-5-5` | `medium` | `client.messages.parse(output_format=FixProposal)` |
+| Goal reader | `openai/gpt-oss-20b` | `low` | JSON object mode, schema in the system prompt, validated with Pydantic, one retry with the validation error |
+| Planner | `openai/gpt-oss-20b` | `low` | `chat.completions.create(tools=..., tool_choice="auto")`, tool results sent back as `role: "tool"` messages |
+| Fixer | `openai/gpt-oss-120b` | `medium` | Same as the goal reader, with `FixProposal` |
 
 Notes:
-- Forced `tool_choice` (`any` or a specific tool) returns a 400 on this model. Structured output uses `messages.parse`, and the planner uses `auto`.
-- Every response is checked for `stop_reason == "refusal"` before reading content.
-- One model for all roles keeps prompt caching and configuration simple. Switching to `claude-sonnet-5-5` is a one-line change in `llm/client.py` if speed or cost becomes a problem.
+- The model is set with `EPOCHZERO_MODEL` in `backend/.env`; any Groq chat model with tool calling works. `reasoning_effort` is sent only to `openai/gpt-oss-*` models.
+- Rate limits and API errors raise `LLMError`; every role then falls back to its offline version, so a run never fails because of the LLM.
+- Planner prompts are kept small (facts capped at 5000 characters) to stay inside Groq rate limits.
 - `EPOCHZERO_LLM=mock` swaps in canned responses so the full pipeline runs offline. This is used for tests, frontend development, and as the demo fallback.
 
 ### Why no trained models
@@ -200,7 +200,7 @@ EpochZero/
   .gitignore
   backend/
     requirements.txt
-    .env                          ANTHROPIC_API_KEY, EPOCHZERO_LLM (gitignored)
+    .env                          GROQ_API_KEY, EPOCHZERO_MODEL, EPOCHZERO_LLM (gitignored)
     .env.example
     app/
       __init__.py
@@ -288,7 +288,7 @@ EpochZero/
 
 `api -> agent -> {tools, analysis, goals, knowledge, llm, sandbox} -> schemas`
 
-- Only `llm/client.py` imports `anthropic`.
+- Only `llm/client.py` imports `groq`.
 - Only `sandbox/` executes user code.
 - `tools/` never imports from `agent/`.
 - `verifier.py` never calls the LLM.
@@ -315,7 +315,7 @@ TaskType = Literal[
 
 class AnalyzeRequest(BaseModel):
     code: str
-    goal: str
+    goal: str = ""                               # optional; inferred from the code when empty
     input_shape: list[int] | None = None        # e.g. [1, 3, 224, 224]
     answers: dict[str, str] = {}                # question_id -> answer
 
@@ -387,6 +387,7 @@ class Coverage(BaseModel):
 class StepEvent(BaseModel):       type: Literal["step"]; phase: Literal["parse","context","baseline","plan","repair","verify","report"]; message: str
 class ToolCallEvent(BaseModel):   type: Literal["tool_call"]; tool: str; args: dict; reason: str
 class ToolResultEvent(BaseModel): type: Literal["tool_result"]; tool: str; ok: bool; summary: str; finding_ids: list[str]
+class GoalEvent(BaseModel):       type: Literal["goal"]; profile: GoalProfile; inferred: bool; summary: str
 class FindingEvent(BaseModel):    type: Literal["finding"]; finding: Finding
 class AttemptEvent(BaseModel):    type: Literal["attempt"]; finding_id: str; attempt: int; status: VerifyStatus; detail: str
 class SuggestionEvent(BaseModel): type: Literal["suggestion"]; suggestion: Suggestion
@@ -444,7 +445,8 @@ Each rule is a function `(facts, profile) -> list[Finding]`. Rules never raise; 
 
 - `extract.py`: builds a reduced script from the user's code containing only imports, constant assignments at module level, `nn.Module` class definitions, helper functions those classes call, the model instantiation expression, and loss/optimizer construction. It drops training and validation loops, `if __name__ == "__main__"` blocks, file and network I/O (`open`, `torch.load`, `requests`, `urllib`, dataset downloads), and `DataLoader` construction.
 - `harness.py`: a template appended to the extracted code. It receives a JSON job (`{"kind": "shape_probe", "input_shape": [...], ...}`), runs it, and prints one JSON result to stdout.
-- `runner.py`: writes extracted code plus harness to a fresh temp directory, runs `python -I <file>` with a 15 second timeout and `CUDA_VISIBLE_DEVICES=""`, captures stdout/stderr, parses the JSON. Returns `ToolResult(ok=False, reason=...)` on timeout, crash before the harness runs, or invalid output.
+- `worker.py`: one long-lived `python -I` process that imports torch once at backend startup and runs each job in a fresh namespace, reading jobs from stdin and writing results to stdout.
+- `runner.py`: sends extracted code plus harness to the worker with a 15 second timeout and `CUDA_VISIBLE_DEVICES=""`. If a job hangs, the worker is killed and restarted; if it crashes the worker, the job is retried once in a fresh worker. Results are cached by script hash.
 
 The sandbox is a crash and hang boundary for a demo, not a security boundary (internal note, not shown in the app).
 
@@ -689,7 +691,7 @@ Badges: 1px border in the status color, text in the status color, transparent fi
 |---|---|---|
 | `page.tsx` | owns `code`, `goal`, `inputShape`, `answers`, `events[]`, `findings`, `suggestions`, `question`, `coverage`, `status` (`idle`/`analyzing`/`needs_input`/`done`/`error`), `selectedFindingId`, `editorMode` (`edit`/`diff`) | Single source of state. Derives findings and suggestions from events. |
 | `TopBar` | `status`, `onCheck`, `disabled` | Product name as plain text, status text ("Analyzing", "Waiting for your answer", "3 findings, 2 resolved"), Check button. Ctrl+Enter triggers Check. |
-| `GoalInput` | `goal`, `inputShape`, setters | Goal textarea (required, placeholder "Describe what this model should do, e.g. 5-class road scene segmentation"). Input shape text field accepting comma-separated integers, validated on blur, error text below in `--crash`. |
+| `GoalInput` | `goal`, `inputShape`, setters, `inferred`, `onUseInferred` | Goal textarea (optional). When it is empty, the task inferred from the code is shown under it with a Use as goal button; the developer can correct the goal and press Check again. Input shape text field accepting comma-separated integers, validated on blur, error text below in `--crash`. |
 | `CodeEditor` | `code`, `onChange`, `findings`, `selectedFindingId`, `onSelectFinding` | Monaco, language python, theme `vs-dark`, font JetBrains Mono 13px, minimap off. Markers via `setModelMarkers`: crash as Error, silent as Warning, risk as Info. Hover message shows finding title and message. Clicking a marked line selects the finding. Selected finding's lines get a solid `--surface-raised` line background decoration. |
 | `PatchDiff` | `original`, `suggestion`, `onAccept`, `onReject` | Monaco `DiffEditor`, side by side, read-only, scrolled to the patched range. Header shows finding title, verify status badge, attempts. Accept (primary) applies the patch to `code`, returns to edit mode, and starts a new analysis. Reject (danger) closes the diff and marks the suggestion dismissed for this session. Accept is disabled for `unresolved` suggestions and shows the text "This patch did not pass verification". |
 | `FindingsPanel` | `suggestions`, `findings`, `selectedFindingId`, `onSelect` | Groups by impact in order Crash, Silent, Risk. Group headers show count. Empty state after a run: "No issues found in the checks that ran. See Coverage for what was checked." Empty state before a run: "Paste a training script, describe your goal, and press Check." |
@@ -753,9 +755,9 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install fastapi "uvicorn[standard]" pydantic anthropic python-dotenv pytest httpx
+pip install fastapi "uvicorn[standard]" pydantic groq python-dotenv pytest httpx
 pip freeze > requirements.txt
-"ANTHROPIC_API_KEY=`nEPOCHZERO_LLM=live" | Out-File .env.example -Encoding utf8
+"GROQ_API_KEY=`nEPOCHZERO_MODEL=`nEPOCHZERO_LLM=live" | Out-File .env.example -Encoding utf8
 Copy-Item .env.example .env      # then put the real key in .env
 cd ..
 ```
@@ -783,7 +785,7 @@ cd frontend; npm run dev
 
 Open `http://localhost:3000`.
 
-Offline mode: set `EPOCHZERO_LLM=mock` in `backend/.env`. If `ANTHROPIC_API_KEY` is empty the backend switches to offline mode automatically, and `GET /health` reports `"llm": "mock"`. In offline mode the goal reader is a keyword parser, the planner runs a fixed order (shape probe, then class count), and the fixer has deterministic repairs for EZ001, EZ004, EZ005, EZ006, and EZ008. Live mode falls back to these when an API call fails.
+Offline mode: set `EPOCHZERO_LLM=mock` in `backend/.env`. If `GROQ_API_KEY` is empty the backend switches to offline mode automatically, and `GET /health` reports `"llm": "mock"`. In offline mode the goal reader is a keyword parser, the planner runs a fixed order (shape probe, then class count), and the fixer has deterministic repairs for EZ001, EZ004, EZ005, EZ006, and EZ008. Live mode falls back to these when an API call fails.
 
 Tests:
 
@@ -834,7 +836,7 @@ Phase 3
 - [x] EZ011, docs snippets, demo scripts
 - [x] Frontend components
 - [x] End-to-end in offline mode (all four demos pass in `test_demos.py` and over HTTP)
-- [ ] End-to-end in live mode (needs `ANTHROPIC_API_KEY`; not yet run)
+- [ ] End-to-end in live mode (needs `GROQ_API_KEY`; not yet run)
 - [ ] Visual check of the UI in a browser
 
 Phase 4
@@ -895,6 +897,22 @@ Record every change to scope, contracts, or design here, newest last.
 | D19 | 2026-10-23 | Added `GET /examples` and a Load example picker in the top bar | Fast, reliable demo flow |
 | D20 | 2026-10-23 | Tests are inline snippets (`test_rules.py`) plus full demo runs (`test_demos.py`) instead of per-rule fixture files | Same coverage, faster to write and read |
 | D21 | 2026-10-23 | `mockEvents.ts` dropped; the frontend is developed against the backend in offline mode | One mock path instead of two |
+| D22 | 2026-10-24 | LLM provider switched from Claude to Groq (`openai/gpt-oss-120b`); supersedes the provider part of D5 | No budget for a paid API key; Groq has a free tier |
+| D23 | 2026-10-24 | Structured output via JSON object mode plus Pydantic validation and one corrective retry | Works on every Groq model, not only those with strict schema support |
+| D24 | 2026-10-24 | One-click Apply fix on each finding card and Apply all for verified fixes; patches are applied bottom-up to the analyzed code, overlapping ones skipped, then the script is re-checked | Faster flow; clicking Apply is the human approval |
+| D25 | 2026-10-24 | Goal is optional. With no goal, the task is inferred from the code (dataset names, loss, head) and sent as a `goal` event; the UI shows it with Use as goal | Developers often do not state a goal; the inferred one is editable |
+| D26 | 2026-10-24 | An inferred goal is not counted as a class-count source | It is derived from the code, so counting it would let the code vote for itself |
+| D27 | 2026-10-24 | Verifier reruns the shape probe with the exact input shape the finding was measured on | Bug: the planner used 28x28, the verifier fell back to 224x224 and marked a correct patch unresolved |
+| D28 | 2026-10-24 | Persistent sandbox worker instead of one process per check; planner effort set to low | Each fresh process spent about 6 s importing torch; demos dropped from about 25 s to about 2 s offline |
+| D29 | 2026-10-24 | Unresolved patches can be applied with an Apply anyway button (outlined, red) | The developer has the final say; the re-check after applying shows the result |
+| D30 | 2026-10-24 | Known datasets (MNIST, CIFAR-10/100, ImageNet and others) set the image size and class count hints | Better input-shape inference and goal inference |
+| D31 | 2026-10-24 | Class count is consistent when every source agrees with the head, even with a single source | Bug: one agreeing source was treated as ambiguous and triggered a needless question |
+| D32 | 2026-10-24 | Two Groq models: `openai/gpt-oss-20b` for goal reader and planner, `openai/gpt-oss-120b` for the fixer (`EPOCHZERO_FAST_MODEL`, `EPOCHZERO_MODEL`) | Speed, and Groq rate limits are per model so the free-tier budget is spread |
+| D33 | 2026-10-24 | Rate limits: wait at most 8 s for a reset, otherwise use the offline fallback for that step; every call is logged with time and tokens | Measured cause of a 62 s run: 429 responses with 5 to 13 s waits, retried by the SDK |
+| D34 | 2026-10-24 | Planner receives a compact script summary and reads source with inspect_lines; fixer receives a windowed excerpt for scripts over 120 lines | Cuts tokens per request roughly in half; measured live runs 4 to 10 s |
+| D35 | 2026-10-24 | The planner may only ask a question a check reported it needs; a coverage guard runs the shape probe and class count if the planner skipped them | Observed: the planner asked for a class count before running any check and missed a real shape bug |
+| D36 | 2026-10-24 | "Don't know" is a valid answer everywhere: I don't know button on every question, unknown text in the shape box, no repeated questions; unknown class count leaves the finding unpatched | Users may not know these details |
+| D37 | 2026-10-24 | A 1-channel Conv2d input defaults to 28x28; any shape finding based on an assumed input size is tier probed, with the assumption stated | Real data may differ from the assumption, so it is not claimed as verified |
 
 ---
 

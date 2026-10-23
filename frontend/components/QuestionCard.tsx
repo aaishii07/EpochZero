@@ -13,9 +13,10 @@ export default function QuestionCard({ question, onAnswer }: { question: Questio
     <div className="m-4 rounded-md border border-accent bg-surface p-4">
       <p className="text-[12px] font-medium uppercase tracking-[0.04em] text-accent">Your input is needed</p>
       <p className="mt-2 text-[13px] leading-5">{question.prompt}</p>
-      {question.options && question.options.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {question.options.map((opt) => (
+      <div className="mt-3 flex flex-wrap gap-2">
+        {(question.options ?? [])
+          .filter((opt) => opt.trim().toLowerCase() !== "other")
+          .map((opt) => (
             <button
               key={opt}
               type="button"
@@ -25,8 +26,14 @@ export default function QuestionCard({ question, onAnswer }: { question: Questio
               {opt}
             </button>
           ))}
-        </div>
-      )}
+        <button
+          type="button"
+          onClick={() => submit("dont know")}
+          className="h-8 rounded-md border border-line px-3 text-sm text-muted hover:bg-raised hover:text-ink"
+        >
+          I don&apos;t know
+        </button>
+      </div>
       <form
         className="mt-3 flex gap-2"
         onSubmit={(e) => {

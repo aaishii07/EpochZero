@@ -42,3 +42,73 @@ def test_segmentation_ambiguous_asks_then_resolves():
 def test_val_leak_and_advisory_lr():
     _, s = run("03_val_leak_and_lr.py", "10-class image classification of product photos")
     assert [(x.finding.rule_id, x.verify_status) for x in s] == [("EZ005", "resolved"), ("EZ011", "not_attempted")]
+
+
+FLAWED = """
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets
+
+class FlawedNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(1, 16, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.fc = nn.Linear(1024, 10)
+
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv(x)))
+        x = torch.flatten(x, 1)
+        return self.fc(x)
+
+train_set = datasets.MNIST("data", train=True, download=True)
+model = FlawedNet()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+loss_fn = nn.CrossEntropyLoss()
+for x, y in loader:
+    optimizer.zero_grad()
+    loss = loss_fn(model(x), y)
+    loss.backward()
+    optimizer.step()
+"""
+
+
+def test_user_given_shape_is_used_by_verifier():
+    events = list(orchestrator.run(AnalyzeRequest(code=FLAWED, goal="10-class digit classification", input_shape=[16, 1, 28, 28])))
+    s = [e.suggestion for e in events if e.type == "suggestion"]
+    assert [(x.finding.rule_id, x.verify_status) for x in s] == [("EZ001", "resolved")]
+    assert "3136" in s[0].patch.replacement
+
+
+def test_goal_inferred_from_code_when_missing():
+    events = list(orchestrator.run(AnalyzeRequest(code=FLAWED)))
+    goal = next(e for e in events if e.type == "goal")
+    assert goal.inferred and goal.profile.task == "multiclass_classification" and goal.profile.num_classes == 10
+    s = [e.suggestion for e in events if e.type == "suggestion"]
+    # MNIST in the code gives 28x28 inputs, so the probe measures the real 3136 without a user-given shape.
+    assert [(x.finding.rule_id, x.verify_status) for x in s] == [("EZ001", "resolved")]
+
+
+def test_inferred_goal_does_not_settle_ambiguous_class_count():
+    events, s = run("02b_segmentation_classes_ambiguous.py", "")
+    assert events[-1].type == "needs_input" and events[-1].question.id == "num_classes"
+
+
+def test_agreeing_single_source_is_not_ambiguous():
+    _, s = run("03_val_leak_and_lr.py", "")
+    assert [(x.finding.rule_id, x.verify_status) for x in s] == [("EZ005", "resolved"), ("EZ011", "not_attempted")]
+
+
+def test_dont_know_class_count_does_not_loop():
+    events, s = run("02b_segmentation_classes_ambiguous.py", "road scene segmentation", {"num_classes": "Don't know"})
+    assert events[-1].type == "done"
+    assert [(x.finding.rule_id, x.verify_status) for x in s] == [("EZ004", "not_attempted")]
+
+
+def test_single_channel_conv_assumes_28x28_and_marks_probed():
+    code = FLAWED.replace('train_set = datasets.MNIST("data", train=True, download=True)', "")
+    events = list(orchestrator.run(AnalyzeRequest(code=code, goal="", answers={"input_shape": "dont know"})))
+    s = [e.suggestion for e in events if e.type == "suggestion"]
+    assert [(x.finding.rule_id, x.finding.tier, x.verify_status) for x in s] == [("EZ001", "probed", "resolved")]
+    assert "3136" in s[0].patch.replacement

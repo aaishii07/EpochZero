@@ -31,7 +31,7 @@ export default function PatchDiff({ original, suggestion, onAccept, onReject, on
     if (patch) setTimeout(() => ed.getModifiedEditor().revealLineInCenter(patch.start_line), 50);
   };
 
-  const blocked = verify_status === "unresolved" || !patch;
+  const failed = verify_status === "unresolved";
 
   return (
     <div className="flex h-full flex-col">
@@ -65,17 +65,20 @@ export default function PatchDiff({ original, suggestion, onAccept, onReject, on
           <button
             type="button"
             onClick={onAccept}
-            disabled={blocked}
-            title={blocked ? "This patch did not pass verification" : undefined}
-            className="h-8 rounded-md bg-accent px-3 text-sm font-medium text-on-accent hover:opacity-90 disabled:bg-raised disabled:text-muted disabled:opacity-100"
+            disabled={!patch}
+            className={
+              failed
+                ? "h-8 rounded-md border border-crash px-3 text-sm text-crash hover:bg-raised"
+                : "h-8 rounded-md bg-accent px-3 text-sm font-medium text-on-accent hover:opacity-90 disabled:bg-raised disabled:text-muted disabled:opacity-100"
+            }
           >
-            Accept
+            {failed ? "Apply anyway" : "Accept"}
           </button>
         </div>
       </div>
       {verify_status === "unresolved" && (
         <p className="border-b border-line bg-surface px-4 py-2 text-xs text-unresolved">
-          This patch did not pass verification and cannot be applied.
+          This patch did not pass verification. You can still apply it; EpochZero will check the script again.
         </p>
       )}
       {verify_status === "inconclusive" && (

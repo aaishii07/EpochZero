@@ -7,12 +7,12 @@ from typing import Iterator
 
 from app import config
 from app.agent import fixer
-from app.agent.goal_reader import read_goal
+from app.agent.goal_reader import read_goal, summarize
 from app.agent.planner import investigate
 from app.agent.verifier import Verifier
 from app.analysis.facts import build_facts
 from app.schemas import (
-    AnalyzeRequest, AttemptEvent, Coverage, CoverageEvent, DoneEvent, ErrorEvent, Finding, FindingEvent,
+    AnalyzeRequest, AttemptEvent, Coverage, CoverageEvent, DoneEvent, ErrorEvent, Finding, FindingEvent, GoalEvent,
     NeedsInputEvent, SkippedCheck, StepEvent, Suggestion, SuggestionEvent, ToolResultEvent,
 )
 from app.tools.base import ToolContext, ToolResult
@@ -68,12 +68,20 @@ def _run(req: AnalyzeRequest, started: float) -> Iterator:
     yield StepEvent(phase="parse", message=f"Parsed {len(facts.lines)} lines: {n_models} model class{'es' if n_models != 1 else ''}, "
                                            f"{n_train} training loop{'s' if n_train != 1 else ''}")
 
-    profile, source = read_goal(req.goal)
-    desc = profile.task.replace("_", " ") + (f", {profile.num_classes} classes" if profile.num_classes else "") + \
-        (f", {profile.modality}" if profile.modality != "unknown" else "")
-    yield StepEvent(phase="context", message=f"Goal read as: {desc}" + (" (offline reader)" if source == "offline" else ""))
+    profile, source, inferred = read_goal(req.goal, facts, code)
+    summary = summarize(profile)
+    offline = " (offline reader)" if source == "offline" else ""
+    if inferred:
+        why = f" {profile.notes.rstrip('.')}." if profile.notes else ""
+        yield StepEvent(phase="context", message=f"No goal given. Inferred from the code: {summary}.{why}{offline}")
+    else:
+        yield StepEvent(phase="context", message=f"Goal read as: {summary}{offline}")
+    yield GoalEvent(profile=profile, inferred=inferred, summary=summary)
+    # Downstream prompts always get a goal sentence; an inferred one is marked as such.
+    goal_text = req.goal.strip() or f"(not stated by the developer; inferred from the code: {summary})"
 
-    ctx = ToolContext(code=code, facts=facts, profile=profile, input_shape=req.input_shape, answers=dict(req.answers))
+    ctx = ToolContext(code=code, facts=facts, profile=profile, input_shape=req.input_shape, answers=dict(req.answers),
+                      goal_inferred=inferred)
     found = _Findings()
     checked: list[str] = []
     skipped: list[SkippedCheck] = []
@@ -93,7 +101,7 @@ def _run(req: AnalyzeRequest, started: float) -> Iterator:
             yield FindingEvent(finding=f)
 
     yield StepEvent(phase="plan", message="Planning further checks" + (" (offline planner)" if config.LLM_MODE == "mock" else ""))
-    gen = investigate(ctx, req.goal, list(found.items))
+    gen = investigate(ctx, goal_text, list(found.items))
     while True:
         try:
             event = next(gen)
@@ -132,7 +140,7 @@ def _run(req: AnalyzeRequest, started: float) -> Iterator:
         feedback, proposal, status, detail, attempt = None, None, "not_attempted", "Repair unavailable", 0
         for attempt in range(1, config.FIX_MAX_ATTEMPTS + 1):
             try:
-                proposal = fixer.propose(code, req.goal, profile, f, feedback, proposal.patch if proposal else None)
+                proposal = fixer.propose(code, goal_text, profile, f, feedback, proposal.patch if proposal else None)
             except Exception as e:
                 status, detail = "not_attempted", f"Repair unavailable: {e}"
                 attempt -= 1

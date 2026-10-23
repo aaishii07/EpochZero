@@ -21,7 +21,7 @@ Modality = Literal["image", "text", "tabular", "audio", "unknown"]
 
 class AnalyzeRequest(BaseModel):
     code: str
-    goal: str
+    goal: str = ""  # optional; inferred from the code when empty
     input_shape: list[int] | None = None
     answers: dict[str, str] = Field(default_factory=dict)
 
@@ -123,6 +123,13 @@ class ToolResultEvent(BaseModel):
     finding_ids: list[str] = Field(default_factory=list)
 
 
+class GoalEvent(BaseModel):
+    type: Literal["goal"] = "goal"
+    profile: GoalProfile
+    inferred: bool  # true when no goal was given and the task was inferred from the code
+    summary: str  # one line, usable as a goal text
+
+
 class FindingEvent(BaseModel):
     type: Literal["finding"] = "finding"
     finding: Finding
@@ -166,6 +173,7 @@ Event = Union[
     StepEvent,
     ToolCallEvent,
     ToolResultEvent,
+    GoalEvent,
     FindingEvent,
     AttemptEvent,
     SuggestionEvent,

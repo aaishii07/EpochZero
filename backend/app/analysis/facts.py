@@ -34,6 +34,13 @@ FUNCTIONAL_LOSSES = {
 CLASS_CONST_RE = re.compile(r"^(num|n|nb)_?(classes|labels|class)$|^classes_?num$", re.IGNORECASE)
 CLASS_LIST_RE = re.compile(r"^(class(es)?(_names)?|labels?(_names)?|categories|label_names|class_list)$", re.IGNORECASE)
 EVAL_HINT_RE = re.compile(r"val|valid|test|eval|dev", re.IGNORECASE)
+# Well-known datasets: (number of classes, image side, channels).
+KNOWN_DATASETS = {
+    "MNIST": (10, 28, 1), "FashionMNIST": (10, 28, 1), "KMNIST": (10, 28, 1), "QMNIST": (10, 28, 1),
+    "EMNIST": (None, 28, 1), "CIFAR10": (10, 32, 3), "CIFAR100": (100, 32, 3), "SVHN": (10, 32, 3),
+    "STL10": (10, 96, 3), "ImageNet": (1000, 224, 3), "Food101": (101, 224, 3), "Flowers102": (102, 224, 3),
+}
+DATASET_RE = re.compile(r"\b(" + "|".join(sorted(KNOWN_DATASETS, key=len, reverse=True)) + r")\s*\(")
 
 
 @dataclass
@@ -645,6 +652,12 @@ def _data_hints(facts: CodeFacts):
                     facts.data_hints.setdefault("image_size", (size, size))
                 elif isinstance(size, (list, tuple)) and len(size) == 2 and all(isinstance(s, int) for s in size):
                     facts.data_hints.setdefault("image_size", tuple(size))
+    m = DATASET_RE.search("\n".join(facts.lines))
+    if m:
+        name = m.group(1)
+        n, side, channels = KNOWN_DATASETS[name]
+        facts.data_hints["dataset"] = {"name": name, "num_classes": n, "image_size": side, "channels": channels}
+        facts.data_hints.setdefault("image_size", (side, side))
     if facts.model_classes:
         first_cls = facts.model_classes[0].name
         own = [l for l in facts.layers if l.owner == first_cls and l.type not in {"Sequential", "ModuleList"}]

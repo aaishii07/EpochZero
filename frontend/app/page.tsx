@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AgentTrace, { type TimedEvent } from "@/components/AgentTrace";
 import CoveragePanel from "@/components/CoveragePanel";
 import FindingsPanel from "@/components/FindingsPanel";
-import GoalInput, { parseShape } from "@/components/GoalInput";
+import GoalInput, { parseShape, shapeIsUnknownText } from "@/components/GoalInput";
 import QuestionCard from "@/components/QuestionCard";
 import TopBar from "@/components/TopBar";
 import { analyze, fetchExamples } from "@/lib/api";
@@ -35,6 +35,7 @@ export default function Home() {
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [error, setError] = useState<{ message: string; line: number | null } | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(null);
+  const [inferredGoal, setInferredGoal] = useState<{ summary: string; notes: string } | null>(null);
 
   const [tab, setTab] = useState<Tab>("findings");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -70,6 +71,9 @@ export default function Home() {
         }
         break;
       }
+      case "goal":
+        setInferredGoal(event.inferred ? { summary: event.summary, notes: event.profile.notes } : null);
+        break;
       case "needs_input":
         setQuestion(event.question);
         setStatus("needs_input");
@@ -92,9 +96,15 @@ export default function Home() {
   const run = useCallback(
     async (opts?: { code?: string; answers?: Record<string, string> }) => {
       const runCode = opts?.code ?? code;
-      const runAnswers = opts?.answers ?? answers;
+      let runAnswers = opts?.answers ?? answers;
       const shape = parseShape(inputShape);
-      if (!runCode.trim() || !goal.trim() || shape === "invalid") return;
+      if (!runCode.trim()) return;
+      if (shape === "invalid") {
+        setError({ message: "The input shape is not valid. Use positive integers separated by commas, or leave it empty.", line: null });
+        return;
+      }
+      // "Don't know" typed in the shape box answers the shape question up front, so it is never asked.
+      if (shapeIsUnknownText(inputShape) && !runAnswers.input_shape) runAnswers = { ...runAnswers, input_shape: "dont know" };
 
       abort.current?.abort();
       const controller = new AbortController();
@@ -170,14 +180,26 @@ export default function Home() {
     if (!question) return;
     const next = { ...answers, [question.id]: value };
     setAnswers(next);
-    if (question.id === "input_shape") setInputShape(value);
+    if (question.id === "input_shape" && !/dont know/.test(value)) setInputShape(value);
     run({ answers: next });
   };
 
-  const accept = () => {
-    if (!diffSuggestion?.patch) return;
+  // Every patch refers to line numbers in analyzedCode. Applying bottom-up keeps earlier line numbers valid,
+  // and overlapping patches are skipped. The re-check afterwards confirms the combined result.
+  const applyFixes = (ids: string[]) => {
+    const patches = ids
+      .map((id) => suggestions[id]?.patch)
+      .filter((p): p is NonNullable<typeof p> => !!p)
+      .sort((a, b) => b.start_line - a.start_line);
+    if (!patches.length) return;
     try {
-      const patched = applyPatch(analyzedCode, diffSuggestion.patch);
+      let patched = analyzedCode;
+      let floor = Infinity;
+      for (const p of patches) {
+        if (p.end_line >= floor) continue;
+        patched = applyPatch(patched, p);
+        floor = p.start_line;
+      }
       setCode(patched);
       setDiffId(null);
       run({ code: patched });
@@ -185,6 +207,16 @@ export default function Home() {
       setError({ message: e instanceof Error ? e.message : "Patch could not be applied", line: null });
     }
   };
+
+  const accept = () => {
+    if (diffId) applyFixes([diffId]);
+  };
+
+  // Any patch can be applied; the card and diff label say how far it was verified.
+  const applicable = (s: Suggestion | undefined) => !!s?.patch;
+  const verifiedIds = visibleFindings
+    .map((f) => f.id)
+    .filter((id) => suggestions[id]?.patch && suggestions[id].verify_status === "resolved");
 
   const reject = () => {
     if (!diffId) return;
@@ -208,6 +240,7 @@ export default function Home() {
     setDiffId(null);
     setSelectedId(null);
     setHasRun(false);
+    setInferredGoal(null);
   };
 
   return (
@@ -215,7 +248,7 @@ export default function Home() {
       <TopBar
         statusText={statusText}
         busy={busy}
-        canCheck={!!code.trim() && !!goal.trim()}
+        canCheck={!!code.trim()}
         examples={examples}
         onCheck={() => run()}
         onLoadExample={loadExample}
@@ -232,6 +265,10 @@ export default function Home() {
               setAnswers({});
             }}
             onInputShapeChange={setInputShape}
+            inferred={!goal.trim() ? inferredGoal : null}
+            onUseInferred={() => {
+              if (inferredGoal) setGoal(inferredGoal.summary);
+            }}
           />
           {error && (
             <div className="flex items-start gap-3 border-b border-l-[3px] border-line border-l-crash bg-surface px-4 py-2.5 text-[13px]">
@@ -312,6 +349,10 @@ export default function Home() {
                   setSelectedId(id);
                   setDiffId(id);
                 }}
+                canApply={(id) => !busy && applicable(suggestions[id])}
+                onApply={(id) => applyFixes([id])}
+                verifiedCount={busy ? 0 : verifiedIds.length}
+                onApplyAll={() => applyFixes(verifiedIds)}
               />
             )}
             {tab === "trace" && <AgentTrace events={events} running={busy} />}

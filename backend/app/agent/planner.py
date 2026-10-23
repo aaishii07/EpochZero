@@ -9,11 +9,10 @@ from typing import Generator
 
 from app import config
 from app.agent import prompts
-from app.agent.fixer import numbered
 from app.llm import mock
 from app.llm.client import LLMError, tool_turn
-from app.schemas import Finding, Question, SkippedCheck, ToolCallEvent, ToolResultEvent
-from app.tools.base import ToolContext, ToolResult
+from app.schemas import Finding, Question, SkippedCheck, ToolCallEvent
+from app.tools.base import ToolContext, ToolResult, is_unknown
 from app.tools.registry import TOOLS, as_llm_tools, run_tool
 
 
@@ -52,17 +51,35 @@ def _for_llm(result: ToolResult) -> str:
     return json.dumps(payload, default=str)[:5000]
 
 
+def _compact_facts(ctx: ToolContext) -> dict:
+    """A small view of the script. The planner reads source lines on demand with inspect_lines, which keeps each
+    request well inside free-tier token limits."""
+    f = ctx.facts
+    return {
+        "lines": len(f.lines),
+        "model_classes": [f"{m.name}@{m.line}" for m in f.model_classes],
+        "layers": [f"{l.name}={l.type}{tuple(l.args)}@{l.line}" for l in f.layers][:40],
+        "head": f"{f.head.name}={f.head.type} out={f.head_out}@{f.head.line}" if f.head else None,
+        "final_activation": f"{f.final_activation.kind}@{f.final_activation.line}" if f.final_activation else None,
+        "loss": f"{f.loss.type}@{f.loss.line}" if f.loss else None,
+        "optimizer": f"{f.optimizer.type} lr={f.optimizer.lr}@{f.optimizer.line}" if f.optimizer else None,
+        "loops": [f"{l.kind}@{l.line}: " + ",".join(c.name for c in l.calls)[:160] for l in f.loops][:8],
+        "transforms": [f"{t.var}@{t.line}: " + ",".join(i["type"] for i in t.items) for t in f.transforms][:6],
+        "class_count_sources": [f"{c.kind}={c.value}@{c.line}" for c in f.class_count_sources],
+        "data_hints": f.data_hints,
+    }
+
+
 def _initial_prompt(ctx: ToolContext, goal: str, baseline: list[Finding]) -> str:
-    facts = json.dumps(ctx.facts.summary(), default=str)[:9000]
     base = [{"rule_id": f.rule_id, "title": f.title, "line": f.line} for f in baseline]
+    answers = {k: ("the developer does not know" if is_unknown(v) else v) for k, v in ctx.answers.items()}
     return "\n\n".join([
         f"Developer goal: {goal}",
         f"Task profile: {ctx.profile.model_dump_json()}",
         f"Input shape provided: {ctx.input_shape}",
-        f"Developer answers so far: {json.dumps(ctx.answers)}",
+        f"Developer answers so far: {json.dumps(answers)}",
         f"Baseline static findings: {json.dumps(base)}",
-        f"Extracted facts: {facts}",
-        f"Script:\n{numbered(ctx.code)}",
+        f"Script summary (use inspect_lines to read source): {json.dumps(_compact_facts(ctx), default=str)}",
     ])
 
 
@@ -115,50 +132,69 @@ def investigate(ctx: ToolContext, goal: str, baseline: list[Finding]) -> Generat
             plan.budget_hit = True
             break
         try:
-            resp = tool_turn(prompts.PLANNER, messages, tools)
+            turn = tool_turn(prompts.PLANNER, messages, tools, effort="low")
         except (LLMError, Exception):
             if not plan.results:
                 return (yield from _offline(ctx))
             break
-        messages.append({"role": "assistant", "content": resp.content})
-        uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
-        if not uses:
+        messages.append(turn.assistant_message)
+        if not turn.tool_calls:
             break
-        tool_results, done = [], False
-        for use in uses:
-            args = dict(use.input or {})
+        done = False
+
+        def reply(call_id: str, content: str):
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
+
+        for call in turn.tool_calls:
+            args = dict(call.args)
             reason = str(args.pop("reason", "")).strip()
             calls += 1
-            if use.name == "finish":
+            if call.name == "finish":
                 done = True
-                tool_results.append({"type": "tool_result", "tool_use_id": use.id, "content": "ok"})
+                reply(call.id, "ok")
                 continue
-            if use.name == "ask_user":
+            if call.name == "ask_user":
                 qid = str(args.get("question_id") or "clarification")
                 if qid in ctx.answers:
-                    tool_results.append({"type": "tool_result", "tool_use_id": use.id, "is_error": True,
-                                         "content": f"The developer already answered {qid}: {ctx.answers[qid]}"})
+                    reply(call.id, f"Error: the developer already answered {qid}: {ctx.answers[qid]}")
                     continue
-                plan.question = Question(id=qid, prompt=str(args.get("prompt", "")), options=args.get("options") or None)
+                if qid not in {r.needs for r in pending_needs}:
+                    # Questions must come from a check that reported missing information, never from guessing.
+                    reply(call.id, f"Error: no check has reported that it needs {qid}. Run the relevant check "
+                                   "first (probe_shapes for input_shape, check_class_count for num_classes).")
+                    continue
+                options = args.get("options")
+                plan.question = Question(id=qid, prompt=str(args.get("prompt", "")),
+                                         options=[str(o) for o in options] if isinstance(options, list) and options else None)
                 done = True
-                tool_results.append({"type": "tool_result", "tool_use_id": use.id, "content": "question sent"})
+                reply(call.id, "question sent")
                 continue
-            if use.name not in TOOLS:
-                tool_results.append({"type": "tool_result", "tool_use_id": use.id, "is_error": True, "content": "unknown tool"})
+            if call.name not in TOOLS:
+                reply(call.id, "Error: unknown tool")
                 continue
-            key = (use.name, json.dumps(args, sort_keys=True))
+            if call.name == "probe_shapes" and not isinstance(args.get("input_shape"), list):
+                args = {"input_shape": None}
+            key = (call.name, json.dumps(args, sort_keys=True))
             if key in seen:
-                tool_results.append({"type": "tool_result", "tool_use_id": use.id, "is_error": True,
-                                     "content": "Already run with these arguments; the result has not changed."})
+                reply(call.id, "Error: already run with these arguments; the result has not changed.")
                 continue
             seen.add(key)
-            result = yield from _execute(ctx, use.name, args, reason, plan)
+            result = yield from _execute(ctx, call.name, args, reason, plan)
             if result.needs:
                 pending_needs.append(result)
-            tool_results.append({"type": "tool_result", "tool_use_id": use.id, "content": _for_llm(result)})
+            reply(call.id, _for_llm(result))
         if done:
             break
-        messages.append({"role": "user", "content": tool_results})
+
+    # Coverage guard: the core checks always run, even if the planner finished without them.
+    if plan.question is None:
+        ran = {name for name, _ in plan.results}
+        for name in mock.plan_steps(bool(ctx.facts.model_classes), ctx.facts.head is not None, ctx.profile.task):
+            if name in ran:
+                continue
+            result = yield from _execute(ctx, name, {}, "Coverage guard: core check not yet run by the planner", plan)
+            if result.needs:
+                pending_needs.append(result)
 
     # Safety net: a tool said the fix would be a guess, and the planner did not ask. Ask rather than guess.
     if plan.question is None:

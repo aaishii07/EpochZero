@@ -17,6 +17,8 @@ class ToolContext:
     profile: GoalProfile
     input_shape: list[int] | None = None
     answers: dict[str, str] = field(default_factory=dict)
+    # True when the profile was inferred from the code; then it is not independent evidence about the code.
+    goal_inferred: bool = False
     # Filled by shape_probe so later tools (class count) can use measured output shapes.
     measured: dict[str, Any] = field(default_factory=dict)
 
@@ -31,6 +33,17 @@ class ToolResult:
     # When set, the tool could not run without this information (for example "input_shape").
     needs: str | None = None
     question: str | None = None
+
+
+_UNKNOWN = {"", "dont know", "do not know", "unknown", "not sure", "idk", "no idea", "none", "na", "n/a", "skip", "?"}
+
+
+def is_unknown(answer: str | None) -> bool:
+    """True when the developer answered that they do not know (for example "Don't know")."""
+    if answer is None:
+        return False
+    text = str(answer).strip().lower().replace("'", "").replace("’", "").rstrip(".!")
+    return text in _UNKNOWN or text.startswith(("i dont know", "dont know", "i do not know"))
 
 
 def make_finding(rule_id: str, title: str, message: str, line: int, evidence: list[Evidence],
