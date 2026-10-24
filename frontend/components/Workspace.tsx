@@ -11,7 +11,7 @@ import GoalInput, { parseShape, shapeIsUnknownText } from "@/components/GoalInpu
 import HistoryPanel from "@/components/HistoryPanel";
 import QuestionCard from "@/components/QuestionCard";
 import TopBar from "@/components/TopBar";
-import { analyze, fetchExamples, verifyFixes } from "@/lib/api";
+import { analyze, ApiError, checkHealth, fetchExamples, verifyFixes } from "@/lib/api";
 import { classify, type Origin, type Snapshot } from "@/lib/origin";
 import { loadStore, newLog, saveStore, type HistoryEntry, type Log } from "@/lib/logs";
 import { appliedRange, composePatches, overlaps, rebase, replacementLines, shiftLine } from "@/lib/patch";
@@ -26,6 +26,7 @@ type Tab = "findings" | "history" | "trace" | "coverage";
 // The first check of a new log starts on its own once a script has been pasted; later checks are manual.
 const AUTO_CHECK_MIN_LINES = 5;
 const AUTO_CHECK_DELAY_MS = 1200;
+const SERVER_WAKE_LIMIT_MS = 4 * 60 * 1000; // free hosting can take a while to wake and load PyTorch
 
 export default function Workspace() {
   // Log: the working session. Its code, goal, shape, check count, and history are saved in the browser.
@@ -44,6 +45,7 @@ export default function Workspace() {
 
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [examples, setExamples] = useState<Example[]>([]);
+  const [server, setServer] = useState<"waking" | "starting" | "ready" | "offline">("waking");
 
   // Current check.
   const [status, setStatus] = useState<Status>("idle");
@@ -90,8 +92,30 @@ export default function Workspace() {
     saveStore({ activeId: activeLogId, logs });
   }, [activeLogId, logs]);
 
+  // Free hosting puts the backend to sleep when idle. Ping it until it answers, show that it is starting, and load the
+  // examples once it is up.
   useEffect(() => {
-    fetchExamples().then(setExamples).catch(() => setExamples([]));
+    let cancelled = false;
+    const started = Date.now();
+    const poll = async () => {
+      const health = await checkHealth();
+      if (cancelled) return;
+      if (health && health.sandbox === "ready") {
+        setServer("ready");
+        fetchExamples().then((ex) => !cancelled && setExamples(ex)).catch(() => undefined);
+        return;
+      }
+      if (Date.now() - started > SERVER_WAKE_LIMIT_MS) {
+        setServer("offline");
+        return;
+      }
+      setServer(health ? "starting" : "waking");
+      setTimeout(poll, 3000);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleEvent = useCallback((event: AgentEvent, at: number) => {
@@ -208,7 +232,10 @@ export default function Workspace() {
         setStatus((s) => (s === "analyzing" ? "done" : s));
       } catch (e) {
         if (controller.signal.aborted) return;
-        setError({ message: e instanceof Error ? `Could not reach the analysis server. ${e.message}` : "Could not reach the analysis server.", line: null });
+        const message = e instanceof ApiError
+          ? e.detail || `The analysis server returned an error (${e.status}).`
+          : "Could not reach the analysis server. If it was asleep it may still be starting; try again in a minute.";
+        setError({ message, line: null });
         setStatus("error");
       }
     },
@@ -535,6 +562,17 @@ export default function Workspace() {
               if (inferredGoal) setGoal(inferredGoal.summary);
             }}
           />
+          {server !== "ready" && (
+            <div className="flex items-center gap-3 border-b border-line border-l-[3px] border-l-accent bg-surface px-4 py-2 text-[13px]">
+              <span className="flex-1 text-muted">
+                {server === "offline"
+                  ? "The analysis server is not reachable. Check that the backend is running, then reload the page."
+                  : server === "starting"
+                    ? "The analysis server is up and loading PyTorch. This takes up to a minute after it wakes."
+                    : "Waking the analysis server. On free hosting it sleeps when idle, so the first start can take about a minute."}
+              </span>
+            </div>
+          )}
           {error && (
             <div className="flex items-start gap-3 border-b border-l-[3px] border-line border-l-crash bg-surface px-4 py-2.5 text-[13px]">
               <span className="flex-1">

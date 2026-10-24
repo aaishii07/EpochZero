@@ -1,0 +1,31 @@
+# Render blueprint for the EpochZero backend (FastAPI + the PyTorch sandbox).
+# Render reads this file when you create a Blueprint from the repository. See DEPLOY.md.
+services:
+  - type: web
+    name: epochzero-api
+    runtime: python
+    plan: free
+    # The repository root is the working directory, so the demo/ scripts next to backend/ are available.
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # Secret: paste your Groq key in the Render dashboard (it is never stored in the repository).
+      - key: GROQ_API_KEY
+        sync: false
+      # The Vercel URL of the frontend, for example https://epochzero.vercel.app (comma separate several).
+      - key: EPOCHZERO_CORS_ORIGINS
+        sync: false
+      # Checks per visitor per 10 minutes, to protect the free Groq quota.
+      - key: EPOCHZERO_RATE_LIMIT
+        value: "20"
+      # The free plan has 512 MB of memory and a slow CPU: keep the CPU dry run to small models and allow more time.
+      - key: EPOCHZERO_DRY_RUN_MAX_PARAMS
+        value: "5000000"
+      - key: EPOCHZERO_SANDBOX_TIMEOUT
+        value: "45"
+      - key: EPOCHZERO_SANDBOX_STARTUP
+        value: "240"

@@ -7,13 +7,16 @@ the task would deliver them, and that assumption is stated in every finding.
 
 from __future__ import annotations
 
+from app import config
 from app.sandbox.runner import run_job
 from app.schemas import Evidence, SkippedCheck
 from app.tools.base import ToolContext, ToolResult, make_finding
 from app.tools.dynamic.shape_probe import ASSUMED, resolve_input_shape
 
 TOOL = "dry_run"
-MAX_PARAMS = 150_000_000  # larger models would make a CPU dry run slow; the meta-device shape probe still covers them
+# Larger models would make a CPU dry run slow or run a small host out of memory; the meta-device shape probe still
+# covers them. Set with EPOCHZERO_DRY_RUN_MAX_PARAMS.
+MAX_PARAMS = config.DRY_RUN_MAX_PARAMS
 
 TARGET_TEXT = {
     "class": "class indices (one per sample, or one per input pixel for dense outputs)",
@@ -78,7 +81,7 @@ def run(ctx: ToolContext) -> ToolResult:
     job = {"kind": "dry_run", "input_shape": shape, "dtype": dtype, "model_class": model_class,
            "inst_sources": [i.source for i in f.instantiations if i.cls == model_class],
            "loss_sources": _loss_sources(ctx), "target_kind": kind, "max_params": MAX_PARAMS}
-    res = run_job(ctx.code, job, timeout=30)
+    res = run_job(ctx.code, job, timeout=2 * config.SANDBOX_TIMEOUT_SECONDS)  # training steps take longer than a probe
     data = {"input_shape": shape, "shape_origin": origin, "target_kind": kind}
     assumed = origin.startswith(ASSUMED)
     targets = TARGET_TEXT.get(kind or "", "no targets (the loss was not recognised, so the output mean was used)")

@@ -16,12 +16,12 @@ import tempfile
 import threading
 from pathlib import Path
 
-from app.config import SANDBOX_TIMEOUT_SECONDS
+from app.config import SANDBOX_STARTUP_SECONDS, SANDBOX_TIMEOUT_SECONDS
 from app.sandbox.extract import extract
 from app.sandbox.harness import HARNESS
 
 WORKER = Path(__file__).with_name("worker.py")
-STARTUP_TIMEOUT = 60
+STARTUP_TIMEOUT = SANDBOX_STARTUP_SECONDS
 
 # The verifier reruns the same probe on the original code; identical scripts reuse the earlier result.
 _cache: dict[str, dict] = {}
@@ -30,6 +30,7 @@ _cache: dict[str, dict] = {}
 class _Worker:
     def __init__(self):
         self.proc: subprocess.Popen | None = None
+        self.ready = False  # torch imported and the worker answered
         self.lines: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
         self.cwd = tempfile.mkdtemp(prefix="epochzero_")
@@ -42,10 +43,12 @@ class _Worker:
         )
         self.lines = queue.Queue()
         threading.Thread(target=self._pump, args=(self.proc, self.lines), daemon=True).start()
+        self.ready = False
         ready = self._read(STARTUP_TIMEOUT)
         if not ready or not ready.get("ready"):
             self._kill()
             raise RuntimeError("sandbox worker did not start")
+        self.ready = True
 
     @staticmethod
     def _pump(proc: subprocess.Popen, lines: queue.Queue):
@@ -95,6 +98,11 @@ class _Worker:
 
 
 _worker = _Worker()
+
+
+def worker_ready() -> bool:
+    proc = _worker.proc
+    return _worker.ready and proc is not None and proc.poll() is None
 
 
 def warm_up():
