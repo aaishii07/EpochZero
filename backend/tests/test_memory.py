@@ -34,3 +34,28 @@ def test_repeat_is_kept_when_the_fix_was_undone():
 def test_request_accepts_history():
     req = AnalyzeRequest(code=CODE, history=[FIX.model_dump()], previous_open=[{"rule_id": "EZ006", "title": "x", "line": 3}])
     assert req.history[0].title == FIX.title and req.previous_open[0].line == 3
+
+
+def test_agent_keeps_recent_results_and_shortens_older_ones():
+    from app.agent.agent import KEEP_FULL_RESULTS, _compact
+    messages = [{"role": "user", "content": "start"}] + [
+        {"role": "tool", "tool_call_id": str(i), "content": "x" * 2000} for i in range(6)]
+    _compact(messages)
+    tools = [m for m in messages if m["role"] == "tool"]
+    assert all(m["content"].endswith("[shortened]") for m in tools[:-KEEP_FULL_RESULTS])
+    assert all(len(m["content"]) == 2000 for m in tools[-KEEP_FULL_RESULTS:])
+
+
+def test_offline_agent_reports_and_finishes():
+    import os
+    os.environ["EPOCHZERO_LLM"] = "mock"
+    from app import config
+    config.LLM_MODE = "mock"
+    from pathlib import Path
+    from app.agent import orchestrator
+    code = (Path(__file__).resolve().parents[2] / "demo" / "01_shape_mismatch.py").read_text(encoding="utf-8")
+    events = list(orchestrator.run(AnalyzeRequest(code=code, goal="10-class image classification")))
+    kinds = [e.type for e in events]
+    assert "agent" in kinds and "report" in kinds and kinds[-1] == "done"
+    report = next(e for e in events if e.type == "report")
+    assert report.mode == "offline" and "verified" in report.text

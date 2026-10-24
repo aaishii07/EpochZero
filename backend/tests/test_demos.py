@@ -165,10 +165,10 @@ def test_review_findings_flow_through_repair(monkeypatch):
 
     monkeypatch.setattr(config, "LLM_MODE", "live")
     monkeypatch.setattr(reviewer, "review", fake_review)
-    from app.agent import fixer, goal_reader, planner
+    from app.agent import agent, fixer, goal_reader
     from app.llm import mock
     monkeypatch.setattr(goal_reader, "structured", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
-    monkeypatch.setattr(planner, "tool_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(agent, "tool_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(fixer, "structured", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
     events = list(orchestrator.run(AnalyzeRequest(code=FLAWED, goal="10-class digit classification")))
     s = {x.finding.rule_id: x for x in (e.suggestion for e in events if e.type == "suggestion")}

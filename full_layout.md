@@ -110,6 +110,34 @@ These are three separate axes and the UI shows all three.
 
 ## 3. How it works
 
+### 3.0 EpochZero is an agent
+
+EpochZero is an AI agent: one LLM-driven loop (`backend/app/agent/agent.py`) owns the job from start to finish. It
+observes the script, decides what to do, acts through tools, reads every result, and decides again, until it calls
+`finish` with a report for the developer.
+
+| Tool | Kind | What it does |
+|---|---|---|
+| `probe_shapes` | deterministic | Builds the model on meta tensors; finds layers that reject their input |
+| `dry_run` | deterministic | Two real training steps on CPU with the script's own loss |
+| `check_class_count` | deterministic | Compares the head size with every class count in the code and goal |
+| `run_static_rules`, `check_goal_alignment` | deterministic | Rule checks (also run once before the agent starts) |
+| `inspect_lines` | deterministic | Reads source lines on demand |
+| `review_code` | LLM sub-agent | A separate reviewer reads the whole script; findings are advisory |
+| `propose_fixes` | LLM + verifier | Writes fixes and verifies each by rerunning the check that found it |
+| `test_fixes_together` | deterministic | Applies fixes together and reports any that break each other |
+| `ask_user` | interaction | Asks the developer, only when a check reports missing information |
+| `finish` | report | Ends the job with a written report |
+
+What makes it an agent rather than a pipeline: the order of tools is the model's choice; failed verification comes
+back as a tool result and the agent decides whether to retry with new guidance or leave the fix to the developer;
+clashing fixes are reported back and re-planned; it knows the log's history (D65) and must not undo earlier fixes;
+it explains each action in the Agent trace and writes the closing report. Deterministic tools decide what is
+proven, the LLM decides what to do next. A guard after the loop runs anything essential the agent skipped (core
+checks, code review, one repair attempt per finding, the combined test), so a weak or rate-limited model can make a
+run slower, never less checked. Offline, or when the agent model is unavailable, a built-in plan drives the same
+tools and the report says so.
+
 ### 3.1 The big picture
 
 There is one agent. It is a Python loop (the orchestrator) that calls one LLM in three roles. Everything that detects or verifies is plain deterministic Python. No models are trained.
@@ -952,6 +980,8 @@ Record every change to scope, contracts, or design here, newest last.
 | D64 | 2026-10-24 | The fixer is told about the other problems being fixed in the same check, so its patch stays consistent with them | Fixes were written in isolation |
 | D65 | 2026-10-24 | Every check sends the log's history (applied fixes with their removed and added lines) and the previous check's unfixed findings. The reviewer is told which changes were deliberate, must not re-report or undo them, and must report problems they introduced; the fixer is told not to undo them; the planner sees them. Reviewer issues that repeat a fix still present in the code are dropped, unless they say the fix caused them | The backend is stateless, so without this the agent forgot every earlier fix on each check |
 | D66 | 2026-10-24 | The code review waits up to 30 s for rate-limit resets (other steps 8 s) and switches model before waiting; if it still cannot run, the app says the result is not complete instead of "No issues found". Reviewer filters tightened: the "not a problem" filter only reads the title and the start of the explanation, and the "already fixed" filter only compares with code-review fixes, needs two shared content words, and ignores generic words such as "error". Dropped reviewer issues are logged | Observed: after a syntax fix the automatic re-check hit the rate limit, the review was skipped silently, and the app showed "No issues found" for a script with many problems |
+| D67 | 2026-10-24 | EpochZero is restructured as one agent: the LLM loop decides every step (checks, code review, fixes, retries with guidance, combined test, questions, finish) through tools and writes the closing Agent report; the fixed plan-review-repair pipeline is replaced; a guard completes anything essential the agent skipped; agent notes stream to the trace (`agent` events) and the report to the Findings tab (`report` event, with who wrote it). Supersedes the planner design of D16 and D35 and the "one agent calling one LLM in three roles" of D1 | The project is about AI agents: the model must own the decisions, not only fill in steps of a fixed pipeline |
+| D68 | 2026-10-24 | Agent token economy: older tool results in the agent conversation are shortened (the last three stay full); the agent waits up to 30 s on rate limits | Observed: back-to-back test runs exhausted the Groq free daily token quota (a 1376 s reset) |
 
 ---
 

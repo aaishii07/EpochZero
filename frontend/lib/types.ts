@@ -93,6 +93,8 @@ export type AgentEvent =
   | { type: "tool_call"; tool: string; args: Record<string, unknown>; reason: string }
   | { type: "tool_result"; tool: string; ok: boolean; summary: string; finding_ids: string[] }
   | { type: "goal"; profile: GoalProfile; inferred: boolean; summary: string }
+  | { type: "agent"; kind: "thought"; text: string }
+  | { type: "report"; text: string; mode: "llm" | "fallback" | "offline" }
   | { type: "finding"; finding: Finding }
   | { type: "attempt"; finding_id: string; attempt: number; status: VerifyStatus; detail: string }
   | { type: "suggestion"; suggestion: Suggestion }

@@ -15,6 +15,7 @@ interface Props {
   hasRun: boolean;
   done: boolean;
   reviewSkipped: string | null; // why the code review did not run, if it did not
+  report: Report | null;
   onOpen: (id: string) => void;
   fixState: (id: string) => FixState;
   canApply: (id: string) => boolean;
@@ -63,7 +64,7 @@ function savedGroup(): GroupBy {
 }
 
 export default function FindingsPanel({
-  findings, suggestions, repairing, selectedId, hasRun, done, reviewSkipped, onOpen, fixState, canApply, onApply, onUndo, applyAllCount,
+  findings, suggestions, repairing, selectedId, hasRun, done, reviewSkipped, report, onOpen, fixState, canApply, onApply, onUndo, applyAllCount,
   unverifiedCount, onApplyAll, checking, clashes, origins, notice, onDismissNotice,
 }: Props) {
   const [groupBy, setGroupBy] = useState<GroupBy>(savedGroup);
@@ -98,6 +99,7 @@ export default function FindingsPanel({
   const compared = fromFix + still + fresh > 0;
   return (
     <div className="space-y-5 p-4">
+      {report && <ReportCard report={report} />}
       {compared && (
         <p className="rounded-md border border-line bg-surface px-3 py-2 text-[13px] text-muted">
           Compared with the last check: <span className="text-inconclusive">{fromFix} on lines your fixes changed</span>,{" "}
@@ -177,6 +179,27 @@ export default function FindingsPanel({
         );
       })}
     </div>
+  );
+}
+
+interface Report {
+  text: string;
+  mode: "llm" | "fallback" | "offline";
+}
+
+const REPORT_SOURCE: Record<Report["mode"], string> = {
+  llm: "Written by the agent",
+  fallback: "Built-in summary: the agent model was unavailable, so the built-in plan finished the job",
+  offline: "Built-in summary (offline mode)",
+};
+
+function ReportCard({ report }: { report: Report }) {
+  return (
+    <section className="rounded-md border border-line border-l-[3px] border-l-accent bg-surface p-3">
+      <h2 className="text-[12px] font-medium uppercase tracking-[0.04em] text-accent">Agent report</h2>
+      <p className="mt-1.5 text-[13px] leading-5 text-ink">{report.text}</p>
+      <p className="mt-1.5 text-[11px] text-muted">{REPORT_SOURCE[report.mode]}</p>
+    </section>
   );
 }
 

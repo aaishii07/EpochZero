@@ -20,7 +20,7 @@ export default function TopBar({
   return (
     <header className="flex h-12 shrink-0 items-center gap-4 border-b border-line bg-surface px-4">
       <span className="text-[15px] font-semibold tracking-tight">EpochZero</span>
-      <span className="hidden text-xs text-muted xl:inline">Pre-training validation for PyTorch</span>
+      <span className="hidden text-xs text-muted xl:inline">Pre-training validation agent for PyTorch</span>
       <div className="flex items-center gap-2">
         <select
           aria-label="Current log"

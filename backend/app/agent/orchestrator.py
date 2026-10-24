@@ -1,4 +1,6 @@
-"""The single agent loop. Yields events for the frontend in the order documented in README section 6."""
+"""Runs one check: parse, read the goal, baseline rules, then the agent (agent.py) and its guard.
+
+Yields events for the frontend in the order documented in README section 6."""
 
 from __future__ import annotations
 
@@ -7,29 +9,20 @@ import time
 from typing import Iterator
 
 from app import config
-from app.agent import fixer, reviewer
+from app.agent import fixer
+from app.agent.agent import Workbench, default_report, guard, run_agent
 from app.agent.goal_reader import read_goal, summarize
 from app.agent.patching import PatchError, apply_patch
-from app.agent.planner import investigate
 from app.agent.verifier import Verifier
 from app.analysis.facts import build_facts
 from app.schemas import (
     AnalyzeRequest, AttemptEvent, Coverage, CoverageEvent, DoneEvent, ErrorEvent, Evidence, Finding, FindingEvent,
-    FixProposal, GoalEvent, GoalProfile, NeedsInputEvent, Patch, SkippedCheck, StepEvent, Suggestion, SuggestionEvent,
-    ToolCallEvent, ToolResultEvent,
+    GoalEvent, GoalProfile, NeedsInputEvent, Patch, ReportEvent, SkippedCheck, StepEvent, Suggestion, SuggestionEvent,
 )
-from app.tools.base import ToolContext, ToolResult, make_finding
-from app.tools.registry import run_tool
+from app.tools.base import ToolContext, make_finding
 
 IMPACT_ORDER = {"crash": 0, "silent": 1, "risk": 2}
 TIER_ORDER = {"verified": 0, "probed": 1, "advisory": 2}
-CHECK_NAMES = {
-    "run_static_rules": "static rules",
-    "check_goal_alignment": "goal alignment",
-    "probe_shapes": "shape probe",
-    "dry_run": "dry run (two training steps)",
-    "check_class_count": "class count",
-}
 
 
 class _Findings:
@@ -163,111 +156,32 @@ def _run(req: AnalyzeRequest, started: float) -> Iterator:
 
     ctx = ToolContext(code=code, facts=facts, profile=profile, input_shape=req.input_shape, answers=dict(req.answers),
                       goal_inferred=inferred)
-    found = _Findings()
-    checked: list[str] = []
-    skipped: list[SkippedCheck] = []
+    wb = Workbench(req=req, ctx=ctx, goal_text=goal_text,
+                   verifier=Verifier(code, profile, req.input_shape, dict(req.answers)))
 
-    def record(name: str, result: ToolResult) -> list[Finding]:
-        if result.ok and CHECK_NAMES.get(name) and CHECK_NAMES[name] not in checked:
-            checked.append(CHECK_NAMES[name])
-        skipped.extend(s for s in result.skipped if s not in skipped)
-        return found.add(result.findings)
-
+    # The cheap deterministic rules always run first, so the agent starts from facts, not guesses.
     yield StepEvent(phase="baseline", message="Running deterministic checks")
     for name in ("run_static_rules", "check_goal_alignment"):
-        result = run_tool(name, ctx)
-        new = record(name, result)
-        yield ToolResultEvent(tool=name, ok=result.ok, summary=result.summary, finding_ids=[f.id for f in new])
-        for f in new:
-            yield FindingEvent(finding=f)
+        yield from wb.run_check(name, {}, "Baseline: deterministic rules run on every check")
 
-    yield StepEvent(phase="plan", message="Planning further checks" + (" (offline planner)" if config.LLM_MODE == "mock" else ""))
-    gen = investigate(ctx, goal_text, list(found.items), req.history)
-    while True:
-        try:
-            event = next(gen)
-        except StopIteration as stop:
-            plan = stop.value
-            break
-        if isinstance(event, tuple):  # ("result", tool name, ToolResult) from the planner
-            _, name, result = event
-            new = record(name, result)
-            yield ToolResultEvent(tool=name, ok=result.ok, summary=result.summary, finding_ids=[f.id for f in new])
-            for f in new:
-                yield FindingEvent(finding=f)
-        else:
-            yield event
-    if plan.budget_hit:
-        skipped.append(SkippedCheck(check="investigation", reason="investigation budget reached"))
-    if facts.model_classes and "shape probe" not in checked and not any(s.check == "shape probe" for s in skipped):
-        skipped.append(SkippedCheck(check="shape probe", reason="not run for this script"))
+    yield StepEvent(phase="plan", message="Agent at work" + (" (offline: built-in plan)" if config.LLM_MODE == "mock" else ""))
+    outcome = yield from run_agent(wb)
+    if outcome.question is None:
+        yield from guard(wb, outcome)
+    if outcome.budget_hit:
+        wb.note_skipped([SkippedCheck(check="agent", reason="the agent reached its step budget; the guard finished the job")])
+    if facts.model_classes and "shape probe" not in wb.checked and not any(s.check == "shape probe" for s in wb.skipped):
+        wb.note_skipped([SkippedCheck(check="shape probe", reason="not run for this script")])
 
-    if plan.question:
-        yield CoverageEvent(coverage=Coverage(checked=checked, skipped=skipped))
-        yield NeedsInputEvent(question=plan.question)
+    if outcome.question:
+        yield CoverageEvent(coverage=Coverage(checked=wb.checked, skipped=wb.skipped))
+        yield NeedsInputEvent(question=outcome.question)
         return
 
-    # Code review: the LLM reads the whole script for problems no rule covers. Advisory, labelled as such.
-    review_patches: dict[str, Patch] = {}
-    if config.LLM_MODE == "mock":
-        skipped.append(SkippedCheck(check="code review", reason="needs the LLM; the backend is in offline mode"))
-    else:
-        yield StepEvent(phase="review", message="Reviewing the whole script for problems the rule checks do not cover")
-        yield ToolCallEvent(tool="code_review", args={}, reason="Read the script end to end for loading, shape, data, "
-                                                                "and training-loop problems beyond the rules")
-        try:
-            reviewed = reviewer.review(code, goal_text, list(found.items), req.history, req.previous_open)
-            new = found.add([f for f, _ in reviewed])
-            review_patches = {f.id: p for f, p in reviewed if f in new and p is not None}
-            checked.append("code review")
-            yield ToolResultEvent(tool="code_review", ok=True, summary=f"{len(new)} more issue{'s' if len(new) != 1 else ''} found",
-                                  finding_ids=[f.id for f in new])
-            for f in new:
-                yield FindingEvent(finding=f)
-        except Exception as e:
-            reason = str(e)[:120] or type(e).__name__
-            skipped.append(SkippedCheck(check="code review", reason=f"the reviewer was unavailable ({reason})"))
-            yield ToolResultEvent(tool="code_review", ok=False, summary=f"Code review unavailable: {reason}")
-
-    findings = found.sorted()
-    yield StepEvent(phase="repair", message=f"{len(findings)} finding{'s' if len(findings) != 1 else ''} to review" if findings
-                    else "No findings to repair")
-    verifier = Verifier(code, profile, req.input_shape, dict(req.answers))
-    for f in findings:
-        if not f.patchable:
-            reason = "Advisory finding; no automatic change is proposed" if f.tier == "advisory" else \
-                "Not patched automatically; the right change depends on your intent"
-            yield SuggestionEvent(suggestion=Suggestion(finding=f, explanation=f.message, patch=None,
-                                                        verify_status="not_attempted", verify_detail=reason, attempts=0))
-            continue
-        feedback, proposal, status, detail, attempt = None, None, "not_attempted", "Repair unavailable", 0
-        # Reviewer findings get one repair retry: they cannot be proven, and each retry costs rate-limited tokens.
-        max_attempts = 2 if f.rule_id == "EZ100" else config.FIX_MAX_ATTEMPTS
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if attempt == 1 and f.id in review_patches:
-                    # The reviewer already proposed a patch with its finding; verify that first.
-                    proposal = FixProposal(explanation=f.message, patch=review_patches[f.id])
-                else:
-                    proposal = fixer.propose(code, goal_text, profile, f, feedback, proposal.patch if proposal else None,
-                                             others=[o for o in findings if o.id != f.id], history=req.history)
-            except Exception as e:
-                if proposal is None:
-                    status, detail = "not_attempted", f"Repair unavailable: {e}"
-                attempt -= 1  # keep the last verified attempt's result
-                break
-            yield StepEvent(phase="verify", message=f"Verifying patch for {f.id} ({f.rule_id}), attempt {attempt}")
-            status, detail = verifier.verify(proposal.patch, f)
-            yield AttemptEvent(finding_id=f.id, attempt=attempt, status=status, detail=detail)
-            if status in ("resolved", "inconclusive"):
-                break
-            feedback = detail
-        yield SuggestionEvent(suggestion=Suggestion(
-            finding=f,
-            explanation=proposal.explanation if proposal else f.message,
-            patch=proposal.patch if proposal else None,
-            verify_status=status, verify_detail=detail, attempts=max(attempt, 0)))
-
+    report = outcome.report or default_report(wb)
+    # The mode says who wrote the report: the agent model, or the built-in summary (offline, or after a fallback).
+    mode = outcome.mode if outcome.report else ("offline" if config.LLM_MODE == "mock" else "fallback")
+    yield ReportEvent(text=report, mode=mode)
     yield StepEvent(phase="report", message="Analysis complete")
-    yield CoverageEvent(coverage=Coverage(checked=checked, skipped=skipped))
+    yield CoverageEvent(coverage=Coverage(checked=wb.checked, skipped=wb.skipped))
     yield DoneEvent(elapsed_ms=int((time.monotonic() - started) * 1000))

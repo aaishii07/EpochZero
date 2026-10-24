@@ -69,6 +69,8 @@ export default function Workspace() {
   const [checking, setChecking] = useState<Set<string>>(new Set());
   const [clashes, setClashes] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  // The agent's closing report for the current check.
+  const [report, setReport] = useState<{ text: string; mode: "llm" | "fallback" | "offline" } | null>(null);
   // Re-check labels: where each finding comes from compared with the previous check in this log.
   const [origins, setOrigins] = useState<Record<string, Origin>>({});
   const compareRef = useRef<Snapshot | null>(null); // the previous check, frozen when a re-check starts
@@ -114,6 +116,9 @@ export default function Workspace() {
         }
         break;
       }
+      case "report":
+        setReport({ text: event.text, mode: event.mode });
+        break;
       case "goal":
         setInferredGoal(event.inferred ? { summary: event.summary, notes: event.profile.notes } : null);
         break;
@@ -153,6 +158,7 @@ export default function Workspace() {
     setInferredGoal(null);
     setClashes({});
     setNotice(null);
+    setReport(null);
     setOrigins({});
   };
 
@@ -609,6 +615,7 @@ export default function Workspace() {
                 hasRun={hasRun}
                 done={status === "done" || status === "needs_input"}
                 reviewSkipped={reviewSkipped}
+                report={report}
                 onOpen={(id) => {
                   setSelectedId(id);
                   // A card with a fix opens its patch (proposed or applied); one without just highlights its lines.

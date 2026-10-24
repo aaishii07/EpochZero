@@ -123,10 +123,11 @@ def _function_tools(tools: list[dict]) -> list[dict]:
                                               "parameters": t["input_schema"]}} for t in tools]
 
 
-def tool_turn(system: str, messages: list, tools: list, effort: str = "medium", model: str | None = None) -> TurnResult:
+def tool_turn(system: str, messages: list, tools: list, effort: str = "medium", model: str | None = None,
+              max_wait: float | None = None) -> TurnResult:
     """One planner step. `messages` holds user/assistant/tool messages; the system prompt is added here."""
     resp = _create(
-        "planner", model or config.FAST_MODEL, effort,
+        "agent", model or config.FAST_MODEL, effort, max_wait=max_wait,
         messages=[{"role": "system", "content": system}, *messages],
         tools=_function_tools(tools),
         tool_choice="auto",

@@ -173,6 +173,20 @@ class GoalEvent(BaseModel):
     summary: str  # one line, usable as a goal text
 
 
+class AgentNoteEvent(BaseModel):
+    """Something the agent says about what it is doing and why."""
+    type: Literal["agent"] = "agent"
+    kind: Literal["thought"] = "thought"
+    text: str
+
+
+class ReportEvent(BaseModel):
+    """The agent's closing report for the developer."""
+    type: Literal["report"] = "report"
+    text: str
+    mode: Literal["llm", "fallback", "offline"]  # who drove the run: the agent model, or the built-in plan
+
+
 class FindingEvent(BaseModel):
     type: Literal["finding"] = "finding"
     finding: Finding
@@ -217,6 +231,8 @@ Event = Union[
     ToolCallEvent,
     ToolResultEvent,
     GoalEvent,
+    AgentNoteEvent,
+    ReportEvent,
     FindingEvent,
     AttemptEvent,
     SuggestionEvent,

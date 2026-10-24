@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Callable
-
 from app.tools.base import ToolContext, ToolResult
 from app.tools.dynamic import dry_run, shape_probe
 from app.tools.static import ast_rules, class_count, goal_rules, hyperparams, pyflakes_rules

@@ -17,6 +17,9 @@ const TOOL_LABEL: Record<string, string> = {
   check_class_count: "class count",
   inspect_lines: "inspect lines",
   code_review: "code review",
+  dry_run: "dry run",
+  propose_fixes: "propose fixes",
+  test_fixes_together: "test fixes together",
 };
 
 export default function AgentTrace({ events, running }: { events: TimedEvent[]; running: boolean }) {
@@ -120,6 +123,10 @@ function describe(e: AgentEvent): { label: string; tone: string; text: React.Rea
       };
     case "goal":
       return null; // the context step already describes the goal
+    case "agent":
+      return { label: "agent", tone: "text-ink", text: <span className="text-ink">{e.text}</span> };
+    case "report":
+      return { label: "report", tone: "text-resolved", text: <span className="text-ink">{e.text}</span> };
     case "suggestion":
       return null;
     case "needs_input":
