@@ -1,4 +1,4 @@
-import type { AgentEvent, AnalyzeRequest, Example } from "./types";
+import type { AgentEvent, AnalyzeRequest, Example, Patch } from "./types";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -34,6 +34,30 @@ export async function analyze(
     }
   }
   if (buffer.trim()) onEvent(JSON.parse(buffer) as AgentEvent);
+}
+
+export interface VerifyResult {
+  accepted: string[];
+  rejected: { id: string; reason: string }[];
+  summary: string;
+}
+
+// Checks fixes together on the backend: each is kept only if the combined script gets no worse.
+export async function verifyFixes(body: {
+  code: string;
+  goal: string;
+  input_shape: number[] | null;
+  answers: Record<string, string>;
+  patches: { id: string; patch: Patch }[];
+  applied_ids: string[];
+}): Promise<VerifyResult> {
+  const res = await fetch(`${API_URL}/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Backend returned ${res.status}`);
+  return res.json();
 }
 
 export async function fetchExamples(): Promise<Example[]> {

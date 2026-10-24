@@ -1,12 +1,16 @@
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 
 from app import config
 from app.agent import orchestrator
 from app.knowledge.docs import rule_catalogue
-from app.schemas import AnalyzeRequest
+from app.agent.verifier import verify_combination
+from app.analysis.facts import build_facts
+from app.llm import mock
+from app.schemas import AnalyzeRequest, GoalProfile, Patch
 
 router = APIRouter()
 
@@ -21,6 +25,36 @@ def analyze(req: AnalyzeRequest):
             yield event.model_dump_json() + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+class PatchItem(BaseModel):
+    id: str
+    patch: Patch
+
+
+class VerifyRequest(BaseModel):
+    code: str  # the analyzed code every patch refers to
+    goal: str = ""
+    input_shape: list[int] | None = None
+    answers: dict[str, str] = {}
+    patches: list[PatchItem]  # in the order to try them
+    applied_ids: list[str] = []  # already applied by the developer; kept as the starting point
+
+
+@router.post("/verify")
+def verify(req: VerifyRequest):
+    """Check fixes together: each is kept only if the combined script gets no worse (no LLM involved)."""
+    code = req.code.replace("\r\n", "\n")
+    try:
+        facts = build_facts(code)
+    except SyntaxError:
+        facts = None
+    if req.goal.strip():
+        profile = mock.read_goal(req.goal)
+    else:
+        profile = mock.infer_goal(facts) if facts else GoalProfile()
+    return verify_combination(code, profile, req.input_shape, req.answers,
+                              [(p.id, p.patch) for p in req.patches], req.applied_ids)
 
 
 @router.get("/health")

@@ -8,7 +8,7 @@ from app.agent.patching import PatchError, apply_patch
 from app.analysis.facts import build_facts
 from app.schemas import GoalProfile, Patch
 from app.tools.base import ToolContext
-from app.tools.static import ast_rules, class_count, goal_rules, hyperparams
+from app.tools.static import ast_rules, class_count, goal_rules, hyperparams, pyflakes_rules
 
 LOOP = """
 import torch
@@ -173,3 +173,31 @@ def test_is_unknown():
     from app.tools.base import is_unknown
     assert all(is_unknown(v) for v in ["Don't know", "dont know", "I don't know.", "unknown", "?", "Not sure"])
     assert not any(is_unknown(v) for v in ["5", "1,3,224,224", None])
+
+
+def test_undefined_name_is_reported():
+    found = [f.rule_id for f in pyflakes_rules.run(ctx("import torch\nmodel = Net()\nx = torch.zeros(1)\n"))]
+    assert found == ["EZ012"]
+
+
+def test_summary_uses_task_name_for_tasks_outside_the_enum():
+    from app.agent.goal_reader import summarize
+    assert summarize(GoalProfile(task="image_to_image", task_name="image restoration", modality="image")) == "image restoration"
+    assert summarize(GoalProfile(task="other", task_name="speech recognition")) == "speech recognition"
+    assert summarize(GoalProfile(task="segmentation", num_classes=5, modality="image")) == "5-class image segmentation"
+
+
+def test_builtin_repairs_for_ez002_ez007_ez010():
+    from app.agent.verifier import Verifier
+    from app.llm import mock
+    cases = [
+        (DOUBLE.format(loss="CrossEntropyLoss"), "EZ002"),
+        (loop("loss = criterion(model(x), y)", "loss.backward()", "optimizer.zero_grad()", "optimizer.step()"), "EZ007"),
+        (loop("optimizer.zero_grad()", "y = y.float()", "loss = criterion(model(x), y)", "loss.backward()", "optimizer.step()"), "EZ010"),
+    ]
+    for code, rule in cases:
+        c = ctx(code)
+        finding = next(f for f in ast_rules.run(c) if f.rule_id == rule)
+        proposal = mock.fix(c.code, finding)
+        status, detail = Verifier(c.code, c.profile, None, {}).verify(proposal.patch, finding)
+        assert status == "resolved", (rule, detail)

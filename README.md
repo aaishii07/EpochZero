@@ -37,7 +37,8 @@ This README is the single source of truth for the build. Any change to scope, co
 
 **Claims we make:**
 - Catches a defined set of common PyTorch training bugs before the first epoch (see section 2).
-- Every patch is re-checked by the same tool that found the problem, and the result is shown as resolved, unresolved, or inconclusive.
+- Every patch for a rule-based finding is re-checked by the same tool that found the problem, and the result is shown as resolved, unresolved, or inconclusive.
+- An LLM code reviewer also reads the whole script for problems no rule covers. Its findings are labelled Advisory and its patches Unverified, because no deterministic check proves them.
 - When the correct fix is ambiguous, EpochZero asks the developer instead of guessing.
 - When a check cannot run, EpochZero says so and says why.
 - No change is applied without explicit human approval.
@@ -71,6 +72,10 @@ This README is the single source of truth for the build. Any change to scope, co
 | EZ009 | Validation loop without `model.eval()` or `torch.no_grad()` | AST | verified | silent |
 | EZ010 | Targets cast to float and passed to `CrossEntropyLoss` | AST | verified | crash |
 | EZ011 | Suspicious hyperparameters (learning rate, batch size with BatchNorm, weight decay) | Heuristics | advisory | risk |
+| EZ000 | Syntax errors (all of them, not only the first) | `ast` | verified | crash |
+| EZ012 | Undefined names and statements invalid where they appear | pyflakes | verified | crash |
+| EZ013 | Legal but almost always mistaken patterns (redefined before use, `is` with a literal) | pyflakes | verified | risk |
+| EZ100 | Anything else the LLM code reviewer finds: pretrained loading misuse, backbone output types, device handling, data pipeline, checkpointing | LLM review | advisory | any |
 
 ### Stretch (only if ahead at hour 6)
 
@@ -141,7 +146,7 @@ The LLM decides and writes. The tools detect and prove. No finding reaches the u
 6. **Repair.** For each patchable finding, the fixer writes a minimal line-range patch plus a short explanation, using the evidence and the rule's documentation snippet.
 7. **Verify.** The verifier applies the patch to the original code, checks it still parses, reruns the tool(s) that produced the finding, and returns `resolved`, `unresolved`, or `inconclusive`. On `unresolved`, the verifier's message goes back to the fixer. Maximum 3 attempts.
 8. **Report.** Each result streams to the frontend as a `suggestion` event, followed by a `coverage` event (what was checked, what was skipped and why) and `done`.
-9. **Approve.** Each finding card has an Apply fix button that applies the patch in one click, plus View patch to review the diff first (Accept or Reject there). When more than one fix passed verification, an Apply all button applies them together. Applying updates the editor and triggers a fresh analysis, because line numbers have changed and the combined result must be checked again.
+9. **Approve.** Clicking a finding card opens its patch as a diff (Accept, Reject, or Back to editor); the Apply fix button on the card applies it directly. Fixes can be applied one at a time without a re-check: the other fixes and markers move with the code, applied fixes can be undone, and fixes that overlap an applied one are marked. The script is re-checked automatically once every suggested fix is applied or after Apply all; otherwise press Check when ready.
 
 ### 3.3 Where the agent actually makes decisions
 
@@ -268,6 +273,8 @@ EpochZero/
       PatchDiff.tsx
       FindingsPanel.tsx
       FindingCard.tsx
+      HistoryPanel.tsx            applied fixes for the active log, newest first
+      Workspace.tsx               the whole app (state, logs, fixes); rendered client-side only
       AgentTrace.tsx
       QuestionCard.tsx
       CoveragePanel.tsx
@@ -277,6 +284,7 @@ EpochZero/
       api.ts                      analyze(request, onEvent) NDJSON reader
       patch.ts                    applyPatch(code, patch) (same logic as backend)
       monacoTheme.ts              flat editor theme matching the design tokens
+      logs.ts                     log and history storage in localStorage
   demo/
     01_shape_mismatch.py
     02_segmentation_classes_grounded.py
@@ -318,6 +326,8 @@ class AnalyzeRequest(BaseModel):
     goal: str = ""                               # optional; inferred from the code when empty
     input_shape: list[int] | None = None        # e.g. [1, 3, 224, 224]
     answers: dict[str, str] = {}                # question_id -> answer
+    history: list[HistoryItem] = []             # fixes applied earlier in this log (title, rule, check, before, after)
+    previous_open: list[OpenFinding] = []       # the previous check's unfixed findings
 
 class GoalProfile(BaseModel):
     task: TaskType
@@ -913,6 +923,35 @@ Record every change to scope, contracts, or design here, newest last.
 | D35 | 2026-10-24 | The planner may only ask a question a check reported it needs; a coverage guard runs the shape probe and class count if the planner skipped them | Observed: the planner asked for a class count before running any check and missed a real shape bug |
 | D36 | 2026-10-24 | "Don't know" is a valid answer everywhere: I don't know button on every question, unknown text in the shape box, no repeated questions; unknown class count leaves the finding unpatched | Users may not know these details |
 | D37 | 2026-10-24 | A 1-channel Conv2d input defaults to 28x28; any shape finding based on an assumed input size is tier probed, with the assumption stated | Real data may differ from the assumption, so it is not claimed as verified |
+| D38 | 2026-10-24 | `task_name` free-text field on GoalProfile and new task types (image_to_image, object_detection, language_modeling, generation, other); summaries use the name when the type is coarse | Bug: a correctly inferred image restoration task was shown as "unknown task" because the type list had no slot for it |
+| D39 | 2026-10-24 | LLM code review phase (EZ100) after the planner. It may raise findings, each with an optional patch; they are tier advisory, and their patches are verified only to parse and introduce no new rule findings (status inconclusive). Supersedes "the LLM never finds bugs" from D1 | 11 fixed rules found 0 of 20+ real issues in a DINOv3 segmentation script; most real bugs are semantic (pretrained loading, model output types) |
+| D40 | 2026-10-24 | pyflakes added to the static rules (EZ012, EZ013) | Undefined names and similar errors crash a run and are deterministic to detect |
+| D41 | 2026-10-24 | Syntax errors become EZ000 findings with fixes instead of an error banner; all errors are listed by blanking each reported line and parsing again | Bug: only the first error was reported and nothing could be applied |
+| D42 | 2026-10-24 | The sandbox blocks torch.hub.load, torch.load, and from_pretrained while building the model, and reports a clear skip reason; numpy added to the backend environment | Bug: the shape probe failed on a missing numpy, and pretrained downloads would hang until the timeout |
+| D43 | 2026-10-24 | Rule-based findings try the built-in deterministic repair first and call the LLM only if it does not apply or fails verification (EZ001, EZ002, EZ004, EZ005, EZ006, EZ007, EZ008, EZ010) | Saves the free-tier token budget for the code review; repairs are instant and verified the same way |
+| D44 | 2026-10-24 | On a long rate-limit wait, a call retries on the fast model at low effort before falling back offline; reviewer findings get at most two repair attempts | Groq limits are per model; observed waits of 13 to 28 s on the larger model |
+| D45 | 2026-10-24 | All LLM prose is passed through a plain-text filter that maps typographic punctuation to ASCII and drops emojis and symbol characters | Team rule: no emojis anywhere in the app |
+| D46 | 2026-10-24 | Apply all covers verified and unverified fixes and states how many are unverified; fixes that failed verification are excluded | With a code review, a script can have a dozen unverified fixes; one click with an honest count |
+| D47 | 2026-10-24 | Reviewer entries flagged `is_real_problem: false`, or phrased as "no issue" or "keep as is", are dropped; patches that change nothing are dropped | Observed: a card reading "No issue; os is already imported" |
+| D48 | 2026-10-24 | Clicking a finding card opens its patch; the View patch button is removed | One click instead of two; clicking already moved to the patch |
+| D49 | 2026-10-24 | Applying a fix no longer re-checks. Applied fixes are tracked as a set and composed onto the analyzed code; remaining patches, markers, and line numbers are shifted to match; overlapping fixes are marked; each applied fix can be undone. The script is re-checked automatically when every suggested fix is applied or after Apply all, otherwise when the developer presses Check. A hand edit pauses the fixes until the next check. Supersedes the re-check part of D24 | Re-checking after every single fix was slow and discarded the other suggestions |
+| D50 | 2026-10-24 | Maximum patch size raised from 15 to 40 lines | Real fixes (for example a dataset `__getitem__`) were rejected only for their size |
+| D51 | 2026-10-24 | Every LLM patch is re-indented against the code it replaces (first line lost its indent, whole block shifted, tabs), keeping the first candidate that parses; prompts require full absolute indentation | Observed: applied fixes repeatedly landed with wrong indentation |
+| D52 | 2026-10-24 | No size limit on patches (supersedes D50) | A correct fix should never be rejected for its length |
+| D53 | 2026-10-24 | Applied fixes stay openable: clicking an applied card opens a diff of what it changed (Undo or Back to editor) | Observed: once applied, the patch could no longer be reviewed |
+| D54 | 2026-10-24 | After applying or closing a diff, the editor scrolls to the changed lines and marks every applied change with a green line tint and gutter bar; hovering shows which fix made it | Observed: the editor jumped back to line 1 after every fix |
+| D55 | 2026-10-24 | History tab: every applied fix with time, check number, status, and its removed and added lines; fixes from the current check can be opened or undone | Developers need to see what was changed and when |
+| D56 | 2026-10-24 | Logs: a log holds one script's code, goal, input shape, check count, and history, saved in the browser (localStorage, guarded). Re-checking stays in the log and keeps its history; New log starts empty; Load example opens a new log; logs can be switched from the top bar. The first check of a log starts automatically once a script of at least 5 lines is pasted and typing pauses; later checks are manual | Requested: history that persists within a session, and a clean start for new code |
+| D57 | 2026-10-24 | The page body moved to `components/Workspace.tsx`, rendered in the browser only | It reads saved logs at startup, which is not possible during server rendering |
+| D58 | 2026-10-24 | Every finding has a pipeline area (`category`: syntax, python, data, pretrained, model, loss, optimization, training_loop, evaluation, device, checkpointing, other); rules map to a fixed area and the reviewer picks one; the Findings tab groups by severity or by area; the reviewer gets precise crash, silent, and risk definitions | Observed: a shape error and a missing checkpoint folder were grouped together as "Crash" with nothing else to tell them apart |
+| D59 | 2026-10-24 | Code-review fixes that pass the safety check are labelled Unverified (not Inconclusive), with a reason that says no automated check covers that kind of issue | The old text claimed a check could not run, which was not true |
+| D60 | 2026-10-24 | Dry run (EZ101 to EZ103, previously stretch): two real training steps on CPU with a random batch, synthetic targets shaped for the task, and the script's own loss. Reports loss and target mismatches, backward errors, non-finite losses, and layers without gradients. Skipped for models over 150M parameters, when weights must be downloaded, or when the forward pass already fails | Most fix-induced breakage is only visible when the loss and backward actually run |
+| D61 | 2026-10-24 | Code-review fixes are verified with static rules, the shape probe, and the dry run; a fix that makes any of them worse (new finding, or a check that can no longer run) is unresolved | "It parses" was the only check before |
+| D62 | 2026-10-24 | `POST /verify`: fixes are checked together before they are applied. Starting from the already applied fixes, each candidate is added in turn and kept only if the combined script gets no worse; held-back fixes show the reason and can still be applied with Apply anyway. Apply all re-checks automatically only if nothing was held back | Each fix was verified alone, so fixes could contradict each other once combined |
+| D63 | 2026-10-24 | Re-check labels: each finding in a re-check is marked "From your fix" (on lines an applied fix changed), "Still present", or "New in this check", with a summary line | Makes clear which problems the fixes caused and which were there before |
+| D64 | 2026-10-24 | The fixer is told about the other problems being fixed in the same check, so its patch stays consistent with them | Fixes were written in isolation |
+| D65 | 2026-10-24 | Every check sends the log's history (applied fixes with their removed and added lines) and the previous check's unfixed findings. The reviewer is told which changes were deliberate, must not re-report or undo them, and must report problems they introduced; the fixer is told not to undo them; the planner sees them. Reviewer issues that repeat a fix still present in the code are dropped, unless they say the fix caused them | The backend is stateless, so without this the agent forgot every earlier fix on each check |
+| D66 | 2026-10-24 | The code review waits up to 30 s for rate-limit resets (other steps 8 s) and switches model before waiting; if it still cannot run, the app says the result is not complete instead of "No issues found". Reviewer filters tightened: the "not a problem" filter only reads the title and the start of the explanation, and the "already fixed" filter only compares with code-review fixes, needs two shared content words, and ignores generic words such as "error". Dropped reviewer issues are logged | Observed: after a syntax fix the automatic re-check hit the rate limit, the review was skipped silently, and the app showed "No issues found" for a script with many problems |
 
 ---
 

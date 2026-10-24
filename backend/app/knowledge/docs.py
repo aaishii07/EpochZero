@@ -3,6 +3,16 @@
 from app.schemas import DocRef
 
 RULES: dict[str, dict] = {
+    "EZ000": {
+        "name": "syntax-error", "tier": "verified", "impact": "crash", "severity": "error",
+        "description": "The script is not valid Python, so it cannot start at all.",
+        "docs": DocRef(
+            title="Python syntax errors",
+            url="https://docs.python.org/3/tutorial/errors.html#syntax-errors",
+            snippet="Python reads the whole file before running it. A single syntax error stops the script before the "
+                    "first line executes, so no other check can run until it is fixed.",
+        ),
+    },
     "EZ001": {
         "name": "shape-mismatch", "tier": "verified", "impact": "crash", "severity": "error",
         "description": "A layer receives a tensor whose size does not match what it was built for.",
@@ -117,12 +127,77 @@ RULES: dict[str, dict] = {
                     "than one sample per batch to compute statistics.",
         ),
     },
+    "EZ012": {
+        "name": "python-runtime-error", "tier": "verified", "impact": "crash", "severity": "error",
+        "description": "A name is used that is never defined, or a statement is invalid where it appears.",
+        "docs": DocRef(
+            title="NameError",
+            url="https://docs.python.org/3/library/exceptions.html#NameError",
+            snippet="Python raises NameError when a variable, function, or module is used before it is defined or "
+                    "imported. The script stops at that line, often after minutes of data loading.",
+        ),
+    },
+    "EZ013": {
+        "name": "python-likely-mistake", "tier": "verified", "impact": "risk", "severity": "warning",
+        "description": "A pattern that is legal Python but is almost always a mistake.",
+        "docs": DocRef(
+            title="pyflakes",
+            url="https://pypi.org/project/pyflakes/",
+            snippet="Redefining a name before using it, comparing with 'is' against a literal, or repeating a "
+                    "dictionary key usually means a typo or a leftover line.",
+        ),
+    },
+    "EZ101": {
+        "name": "training-step-fails", "tier": "verified", "impact": "crash", "severity": "error",
+        "description": "A real training step (forward, loss, backward) fails on a synthetic batch.",
+        "docs": DocRef(
+            title="Loss functions",
+            url="https://pytorch.org/docs/stable/nn.html#loss-functions",
+            snippet="The loss receives the model output and the targets from the dataset. Their shapes and dtypes "
+                    "must match what the loss expects, for example (N, C, H, W) logits with (N, H, W) class indices "
+                    "for CrossEntropyLoss in segmentation.",
+        ),
+    },
+    "EZ102": {
+        "name": "non-finite-loss", "tier": "probed", "impact": "silent", "severity": "error",
+        "description": "The loss is NaN or infinite within the first training steps.",
+        "docs": DocRef(
+            title="Debugging NaN losses",
+            url="https://pytorch.org/docs/stable/autograd.html#anomaly-detection",
+            snippet="A NaN loss in the first steps usually comes from log of zero, division by zero, an activation "
+                    "applied twice, or a loss given probabilities where it expects logits.",
+        ),
+    },
+    "EZ103": {
+        "name": "parameters-without-gradients", "tier": "probed", "impact": "silent", "severity": "warning",
+        "description": "Some trainable layers receive no gradient, so they never learn.",
+        "docs": DocRef(
+            title="torch.Tensor.grad",
+            url="https://pytorch.org/docs/stable/generated/torch.Tensor.grad.html",
+            snippet="A parameter keeps grad=None after backward() when its layer is not used in the forward pass or "
+                    "its output is detached from the loss. The optimizer then never updates it.",
+        ),
+    },
+    "EZ100": {
+        "name": "code-review", "tier": "advisory", "impact": "risk", "severity": "warning",
+        "description": "An issue found by the LLM code reviewer. No deterministic check proves it; review before applying.",
+        "docs": None,
+    },
+}
+
+
+# Pipeline area of each rule, used to group findings. Code-review findings choose their own area.
+RULE_CATEGORY = {
+    "EZ000": "syntax", "EZ001": "model", "EZ002": "loss", "EZ003": "loss", "EZ004": "model", "EZ005": "data",
+    "EZ006": "training_loop", "EZ007": "training_loop", "EZ008": "training_loop", "EZ009": "evaluation",
+    "EZ010": "loss", "EZ011": "optimization", "EZ012": "python", "EZ013": "python", "EZ100": "other",
+    "EZ101": "loss", "EZ102": "loss", "EZ103": "model",
 }
 
 
 def rule_catalogue() -> list[dict]:
     return [
         {"id": rid, "name": r["name"], "description": r["description"], "tier": r["tier"],
-         "impact": r["impact"], "docs_url": r["docs"].url}
+         "impact": r["impact"], "docs_url": r["docs"].url if r["docs"] else None}
         for rid, r in RULES.items()
     ]

@@ -14,9 +14,45 @@ TaskType = Literal[
     "multilabel_classification",
     "regression",
     "segmentation",
+    "image_to_image",  # restoration, denoising, super-resolution, inpainting
+    "object_detection",
+    "language_modeling",
+    "generation",
+    "other",
     "unknown",
 ]
-Modality = Literal["image", "text", "tabular", "audio", "unknown"]
+Modality = Literal["image", "text", "tabular", "audio", "video", "unknown"]
+Category = Literal[
+    "syntax",  # the file is not valid Python
+    "python",  # undefined names, wrong attributes, general Python mistakes
+    "data",  # datasets, transforms, labels, loaders
+    "model",  # architecture, layer sizes, forward pass
+    "pretrained",  # loading weights or pretrained backbones
+    "loss",  # loss function, targets, activations feeding the loss
+    "optimization",  # optimizer, learning rate, scheduler, gradients
+    "training_loop",  # zero_grad, backward, step order, accumulation
+    "evaluation",  # validation and test loops, metrics, eval mode
+    "device",  # CPU/GPU placement, mixed precision
+    "checkpointing",  # saving, loading, and output paths
+    "other",
+]
+
+
+class HistoryItem(BaseModel):
+    """A fix the developer already applied in this log, sent back so the agent knows what was changed on purpose."""
+    title: str
+    rule_id: str
+    check: int  # which check of the log it came from
+    line: int  # first changed line, in the code as it was when the fix was applied
+    before: list[str] = Field(default_factory=list)
+    after: list[str] = Field(default_factory=list)
+
+
+class OpenFinding(BaseModel):
+    """A problem the previous check reported that has not been fixed."""
+    rule_id: str
+    title: str
+    line: int
 
 
 class AnalyzeRequest(BaseModel):
@@ -24,10 +60,15 @@ class AnalyzeRequest(BaseModel):
     goal: str = ""  # optional; inferred from the code when empty
     input_shape: list[int] | None = None
     answers: dict[str, str] = Field(default_factory=dict)
+    history: list[HistoryItem] = Field(default_factory=list)  # fixes applied earlier in this log, oldest first
+    previous_open: list[OpenFinding] = Field(default_factory=list)  # unfixed findings of the previous check
 
 
 class GoalProfile(BaseModel):
     task: TaskType = "unknown"
+    # Short human name for the task, always filled when known, for example "image restoration".
+    # Covers tasks the enum does not name precisely.
+    task_name: str = ""
     num_classes: int | None = None
     modality: Modality = "unknown"
     notes: str = ""
@@ -54,6 +95,8 @@ class Finding(BaseModel):
     severity: Severity
     tier: Tier
     impact: Impact
+    # Which part of the pipeline the problem is in, for grouping in the UI.
+    category: Category = "other"
     line: int
     end_line: int
     evidence: list[Evidence]
@@ -99,7 +142,7 @@ class Coverage(BaseModel):
 
 # Events streamed to the frontend as NDJSON, one per line.
 
-Phase = Literal["parse", "context", "baseline", "plan", "repair", "verify", "report"]
+Phase = Literal["parse", "context", "baseline", "plan", "review", "repair", "verify", "report"]
 
 
 class StepEvent(BaseModel):

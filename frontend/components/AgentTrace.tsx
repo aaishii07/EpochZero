@@ -16,6 +16,7 @@ const TOOL_LABEL: Record<string, string> = {
   probe_shapes: "shape probe",
   check_class_count: "class count",
   inspect_lines: "inspect lines",
+  code_review: "code review",
 };
 
 export default function AgentTrace({ events, running }: { events: TimedEvent[]; running: boolean }) {

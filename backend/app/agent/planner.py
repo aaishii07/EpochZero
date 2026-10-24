@@ -11,7 +11,8 @@ from app import config
 from app.agent import prompts
 from app.llm import mock
 from app.llm.client import LLMError, tool_turn
-from app.schemas import Finding, Question, SkippedCheck, ToolCallEvent
+from app.agent import memory
+from app.schemas import Finding, HistoryItem, Question, SkippedCheck, ToolCallEvent
 from app.tools.base import ToolContext, ToolResult, is_unknown
 from app.tools.registry import TOOLS, as_llm_tools, run_tool
 
@@ -70,17 +71,21 @@ def _compact_facts(ctx: ToolContext) -> dict:
     }
 
 
-def _initial_prompt(ctx: ToolContext, goal: str, baseline: list[Finding]) -> str:
+def _initial_prompt(ctx: ToolContext, goal: str, baseline: list[Finding], history: list[HistoryItem]) -> str:
     base = [{"rule_id": f.rule_id, "title": f.title, "line": f.line} for f in baseline]
     answers = {k: ("the developer does not know" if is_unknown(v) else v) for k, v in ctx.answers.items()}
-    return "\n\n".join([
+    parts = [
         f"Developer goal: {goal}",
         f"Task profile: {ctx.profile.model_dump_json()}",
         f"Input shape provided: {ctx.input_shape}",
         f"Developer answers so far: {json.dumps(answers)}",
         f"Baseline static findings: {json.dumps(base)}",
-        f"Script summary (use inspect_lines to read source): {json.dumps(_compact_facts(ctx), default=str)}",
-    ])
+    ]
+    if history:
+        # Recently changed code is where new problems most likely appear; the dry run checks it end to end.
+        parts.append(memory.history_text(history, ctx.code))
+    parts.append(f"Script summary (use inspect_lines to read source): {json.dumps(_compact_facts(ctx), default=str)}")
+    return "\n\n".join(parts)
 
 
 def _execute(ctx: ToolContext, name: str, args: dict, reason: str, plan: PlanResult) -> Generator:
@@ -105,6 +110,7 @@ def _offline(ctx: ToolContext) -> Generator:
     f = ctx.facts
     reasons = {
         "probe_shapes": "Measure the real output shape and catch any layer that rejects its input.",
+        "dry_run": "Run two real training steps to check the loss, targets, and gradients.",
         "check_class_count": "Compare the measured head size with every class count in the code and goal.",
     }
     for name in mock.plan_steps(bool(f.model_classes), f.head is not None, ctx.profile.task):
@@ -116,14 +122,14 @@ def _offline(ctx: ToolContext) -> Generator:
     return plan
 
 
-def investigate(ctx: ToolContext, goal: str, baseline: list[Finding]) -> Generator:
+def investigate(ctx: ToolContext, goal: str, baseline: list[Finding], history: list[HistoryItem] | None = None) -> Generator:
     """Yields ToolCallEvent / ToolResultEvent; returns PlanResult."""
     if config.LLM_MODE == "mock":
         return (yield from _offline(ctx))
 
     plan = PlanResult()
     tools = _with_reason(as_llm_tools())
-    messages: list = [{"role": "user", "content": _initial_prompt(ctx, goal, baseline)}]
+    messages: list = [{"role": "user", "content": _initial_prompt(ctx, goal, baseline, history or [])}]
     started, calls, seen = time.monotonic(), 0, set()
     pending_needs: list[ToolResult] = []
 

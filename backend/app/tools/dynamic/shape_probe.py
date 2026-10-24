@@ -141,6 +141,13 @@ def run(ctx: ToolContext, input_shape: list[int] | None = None) -> ToolResult:
                           data={**data, "output_shape": out, "records": res.get("records", [])})
 
     stage, error = res.get("stage"), res.get("error", "")
+    if stage != "forward" and "EZ_EXTERNAL:" in error:
+        call = error.split("EZ_EXTERNAL:", 1)[1].split()[0].rstrip("'\",|")
+        return ToolResult(False, f"Model loads pretrained weights with {call}; shape check skipped",
+                          data={**data, "error": error, "stage": stage},
+                          skipped=[SkippedCheck(check="shape probe", reason=f"the model loads pretrained weights with {call} "
+                                                                            "while it is built, which needs a download; the code "
+                                                                            "review covers this part instead")])
     if stage != "forward":
         return ToolResult(False, f"Shape probe could not run: {error}", data={**data, "error": error, "stage": stage},
                           skipped=[SkippedCheck(check="shape probe", reason=f"model could not be built ({error[:160]})")])
@@ -177,4 +184,6 @@ def run(ctx: ToolContext, input_shape: list[int] | None = None) -> ToolResult:
         # Proven for the assumed input, not for the developer's real data.
         **({"tier": "probed"} if assumed else {}),
     )
+    ctx.measured["forward_failed"] = True
+    ctx.measured["input_shape"] = shape
     return ToolResult(True, f"Shape mismatch at {name}: {title}", findings=[finding], data={**data, "error": error})

@@ -79,6 +79,7 @@ class LossInfo:
     line: int
     functional: bool = False
     weight_len: int | None = None
+    source: str = ""  # the constructor call as written, for example "nn.CrossEntropyLoss(ignore_index=255)"
 
 
 @dataclass
@@ -428,7 +429,7 @@ class _Extractor(ast.NodeVisitor):
 
     def _record_loss(self, var: str, call: ast.Call, line: int):
         kwargs = {k.arg: ast.unparse(k.value) for k in call.keywords if k.arg}
-        info = LossInfo(var, callee_name(call), kwargs, line)
+        info = LossInfo(var, callee_name(call), kwargs, line, source=ast.unparse(call))
         for k in call.keywords:
             if k.arg in {"weight", "pos_weight"}:
                 info.weight_len = _tensor_literal_len(k.value)

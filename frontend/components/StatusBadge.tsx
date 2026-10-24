@@ -3,7 +3,7 @@ import type { Impact, Tier, VerifyStatus } from "@/lib/types";
 type Props =
   | { kind: "tier"; value: Tier }
   | { kind: "impact"; value: Impact }
-  | { kind: "status"; value: VerifyStatus | "repairing" };
+  | { kind: "status"; value: VerifyStatus | "repairing" | "unverified" };
 
 const LABELS: Record<string, string> = {
   verified: "Verified",
@@ -15,6 +15,7 @@ const LABELS: Record<string, string> = {
   resolved: "Resolved",
   unresolved: "Unresolved",
   inconclusive: "Inconclusive",
+  unverified: "Unverified",
   not_attempted: "Not attempted",
   repairing: "Repairing",
 };
@@ -29,6 +30,7 @@ const COLORS: Record<string, string> = {
   resolved: "border-resolved text-resolved",
   unresolved: "border-unresolved text-unresolved",
   inconclusive: "border-inconclusive text-inconclusive",
+  unverified: "border-inconclusive text-inconclusive",
   not_attempted: "border-line text-muted",
   repairing: "border-accent text-accent",
 };

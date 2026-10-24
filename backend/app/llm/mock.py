@@ -59,11 +59,20 @@ def infer_goal(facts) -> GoalProfile:
     elif loss in {"BCEWithLogitsLoss", "BCELoss"}:
         task = "binary_classification" if facts.head_out in (None, 1) else "multilabel_classification"
     elif loss in {"MSELoss", "L1Loss", "SmoothL1Loss", "HuberLoss"}:
-        task = "regression"
+        task = "image_to_image" if spatial_head else "regression"
     else:
         task = "unknown"
-    if spatial_head and task == "segmentation":
+    if spatial_head and task in {"segmentation", "image_to_image"}:
         evidence.append("convolutional output head")
+    code_text = "\n".join(facts.lines).lower()
+    keyword_names = [("restor", "image restoration"), ("denois", "image denoising"), ("super_res", "super-resolution"),
+                     ("superres", "super-resolution"), ("deblur", "image deblurring"), ("detect", "object detection")]
+    task_name = next((name for key, name in keyword_names if key in code_text), "")
+    if task == "unknown" and task_name:
+        task = "image_to_image" if task_name != "object detection" else "object_detection"
+        evidence.append(f"'{task_name}' in the code")
+    if not task_name and task == "image_to_image":
+        task_name = "image-to-image regression"
     first = (facts.data_hints.get("first_layer") or {}).get("type", "")
     if first.startswith("Conv") or dataset:
         modality = "image"
@@ -75,14 +84,14 @@ def infer_goal(facts) -> GoalProfile:
     if task == "binary_classification":
         num = 2
     notes = ("Inferred from " + ", ".join(evidence)) if evidence else "No clear signal in the code"
-    return GoalProfile(task=task, num_classes=num, modality=modality, notes=notes)
+    return GoalProfile(task=task, task_name=task_name, num_classes=num, modality=modality, notes=notes)
 
 
 def plan_steps(has_model: bool, has_head: bool, task: str) -> list[str]:
     """Fixed investigation order used when the planner LLM is unavailable."""
     steps = []
     if has_model:
-        steps.append("probe_shapes")
+        steps += ["probe_shapes", "dry_run"]
     if has_head and task in {"multiclass_classification", "multilabel_classification", "segmentation", "unknown"}:
         steps.append("check_class_count")
     return steps
@@ -142,7 +151,39 @@ def fix(code: str, finding: Finding) -> FixProposal:
             return FixProposal(
                 explanation="Adding the loss tensor keeps its graph in memory every step. The patch accumulates a number instead.",
                 patch=Patch(start_line=finding.line, end_line=finding.line, replacement=new))
+    if finding.rule_id == "EZ010":
+        src = line(finding.line)
+        if ".float()" in src:
+            return FixProposal(
+                explanation="CrossEntropyLoss needs class indices of dtype long, not floats. The patch casts the targets "
+                            "with .long() instead.",
+                patch=Patch(start_line=finding.line, end_line=finding.line, replacement=src.replace(".float()", ".long()", 1)))
+    if finding.rule_id == "EZ002":
+        src = line(finding.line)
+        new = re.sub(r"\b(?:F|torch|nn\.functional|torch\.nn\.functional)\.(?:log_)?softmax\((.+?),\s*dim\s*=\s*-?\d+\)",
+                     r"\1", src, count=1)
+        if new == src:
+            new = re.sub(r"\b(?:torch\.)?sigmoid\((.+)\)", r"\1", src, count=1)
+        if new != src:
+            return FixProposal(
+                explanation="The loss already applies this activation internally, so the model applied it twice. The patch "
+                            "returns the raw logits.",
+                patch=Patch(start_line=finding.line, end_line=finding.line, replacement=new))
+    if finding.rule_id == "EZ007" and len(finding.evidence[0].lines) == 3:
+        backward_line, zero_line, _ = finding.evidence[0].lines
+        if backward_line < zero_line:
+            block = lines[backward_line - 1:zero_line - 1]
+            zero = lines[zero_line - 1]
+            moved = indent(block[0]) + zero.strip()
+            return FixProposal(
+                explanation="zero_grad() erased the gradients before step() could use them. The patch moves it in front "
+                            "of backward().",
+                patch=Patch(start_line=backward_line, end_line=zero_line, replacement="\n".join([moved, *block])))
     raise ValueError(f"no offline repair available for {finding.rule_id}")
+
+
+# Rules whose built-in repair is reliable; the fixer tries these first and only calls the LLM if they do not apply.
+DETERMINISTIC_FIXES = {"EZ001", "EZ002", "EZ004", "EZ005", "EZ006", "EZ007", "EZ008", "EZ010"}
 
 
 def _constants(code: str) -> dict[str, int]:

@@ -101,6 +101,16 @@ select {
   }
 }
 
+/* Monaco line decoration for lines changed by an applied fix. Flat tint, no gradient. */
+.ez-applied-line {
+  background: rgba(63, 185, 80, 0.12);
+}
+.ez-applied-glyph {
+  background: var(--resolved);
+  width: 3px !important;
+  margin-left: 3px;
+}
+
 /* Monaco line decoration for the selected finding. */
 .ez-selected-line {
   background: var(--surface-raised);

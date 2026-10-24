@@ -13,6 +13,7 @@ TASK_LABEL = {
     "multilabel_classification": "multi-label classification",
     "regression": "regression",
     "segmentation": "segmentation",
+    "image_to_image": "image-to-image",
 }
 
 

@@ -52,19 +52,29 @@ def _retry_after(e: groq.RateLimitError) -> float | None:
         return None
 
 
-def _create(role: str, model: str, effort: str, **kwargs):
-    extra = {"reasoning_effort": effort} if model.startswith("openai/gpt-oss") else {}
-    for attempt in range(2):
+def _create(role: str, model: str, effort: str, max_wait: float | None = None, **kwargs):
+    """max_wait: total seconds this call may spend waiting for rate-limit resets. Steps that have an offline
+    fallback wait briefly; the code review, which has none, waits longer."""
+    budget = config.MAX_RATE_LIMIT_WAIT_SECONDS if max_wait is None else max_wait
+    waited, switched = 0.0, False
+    for _ in range(6):
+        extra = {"reasoning_effort": effort} if model.startswith("openai/gpt-oss") else {}
         started = time.monotonic()
         try:
             resp = _get().chat.completions.create(model=model, **extra, **kwargs)
         except groq.RateLimitError as e:
             wait = _retry_after(e)
             log.warning("[llm] %s %s rate limited (retry-after %s s)", role, model, wait)
-            if attempt == 0 and wait is not None and wait <= config.MAX_RATE_LIMIT_WAIT_SECONDS:
+            if not switched and model != config.FAST_MODEL and (wait is None or wait > 3):
+                # Groq limits are per model: the fast model usually still has budget left.
+                log.warning("[llm] %s switching to %s for this call", role, config.FAST_MODEL)
+                model, effort, switched = config.FAST_MODEL, "low", True  # low: the smaller model can spend its
+                continue                                                  # whole output budget reasoning otherwise
+            if wait is not None and waited + wait <= budget:
                 time.sleep(wait)
+                waited += wait
                 continue
-            raise LLMError("Groq rate limit reached; using the offline fallback for this step") from e
+            raise LLMError(f"Groq rate limit reached after waiting {waited:.0f} s") from e
         except groq.APIStatusError as e:
             log.warning("[llm] %s %s error %s: %s", role, model, e.status_code, e.message)
             raise LLMError(f"Groq API error {e.status_code}: {e.message}") from e
@@ -79,7 +89,7 @@ def _create(role: str, model: str, effort: str, **kwargs):
 
 
 def structured(system: str, user: str, schema: type[T], effort: str = "medium", role: str = "structured",
-               model: str | None = None) -> T:
+               model: str | None = None, max_tokens: int = 4096, max_wait: float | None = None) -> T:
     """One call that must return an instance of `schema` (goal reader, fixer).
 
     Uses JSON object mode with the schema in the prompt, validates with Pydantic, and retries once with the
@@ -94,8 +104,8 @@ def structured(system: str, user: str, schema: type[T], effort: str = "medium", 
     ]
     last_error = ""
     for _ in range(2):
-        resp = _create(role, model, effort, messages=messages, response_format={"type": "json_object"},
-                       max_completion_tokens=4096)
+        resp = _create(role, model, effort, max_wait=max_wait, messages=messages, response_format={"type": "json_object"},
+                       max_completion_tokens=max_tokens)
         content = resp.choices[0].message.content or ""
         try:
             return schema.model_validate_json(content)

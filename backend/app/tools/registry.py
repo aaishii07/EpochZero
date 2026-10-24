@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import Callable
 
 from app.tools.base import ToolContext, ToolResult
-from app.tools.dynamic import shape_probe
-from app.tools.static import ast_rules, class_count, goal_rules, hyperparams
+from app.tools.dynamic import dry_run, shape_probe
+from app.tools.static import ast_rules, class_count, goal_rules, hyperparams, pyflakes_rules
 
 
 def _static(ctx: ToolContext) -> ToolResult:
-    findings = ast_rules.run(ctx) + hyperparams.run(ctx)
+    findings = ast_rules.run(ctx) + pyflakes_rules.run(ctx) + hyperparams.run(ctx)
     n = len(findings)
     return ToolResult(True, "No static issues found" if not n else f"{n} static issue{'s' if n != 1 else ''} found", findings=findings)
 
@@ -50,6 +50,13 @@ TOOLS: dict[str, dict] = {
         "schema": {"type": "object", "properties": {"input_shape": {"type": ["array", "null"], "items": {"type": "integer"}}},
                    "required": ["input_shape"], "additionalProperties": False},
     },
+    "dry_run": {
+        "fn": lambda ctx, **_: dry_run.run(ctx),
+        "description": "Run two real training steps on CPU with a small random batch and synthetic targets shaped for "
+                       "the task, using the script's own loss. Finds output and target mismatches in the loss, errors "
+                       "in backward, non-finite losses, and layers that never receive gradients. Run probe_shapes first.",
+        "schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+    },
     "check_class_count": {
         "fn": lambda ctx, **_: class_count.run(ctx),
         "description": "Gather every statement of the number of classes (constants, class lists, loss weights, goal, "
@@ -68,12 +75,13 @@ TOOLS: dict[str, dict] = {
 # Evidence tool name -> registry tool that reproduces it. Order matters: shape probe before class count.
 EVIDENCE_TO_TOOL = {
     "shape_probe": "probe_shapes",
+    "dry_run": "dry_run",
     "class_count": "check_class_count",
     "static_rules": "run_static_rules",
     "hyperparameters": "run_static_rules",
     "goal_alignment": "check_goal_alignment",
 }
-TOOL_ORDER = ["probe_shapes", "run_static_rules", "check_goal_alignment", "check_class_count"]
+TOOL_ORDER = ["probe_shapes", "dry_run", "run_static_rules", "check_goal_alignment", "check_class_count"]
 
 PSEUDO_TOOLS = [
     {
@@ -112,6 +120,6 @@ def run_tool(name: str, ctx: ToolContext, **args) -> ToolResult:
 
 def tools_for_findings(evidence_tools: set[str]) -> list[str]:
     wanted = {EVIDENCE_TO_TOOL[t] for t in evidence_tools if t in EVIDENCE_TO_TOOL}
-    if "check_class_count" in wanted:
-        wanted.add("probe_shapes")
+    if "check_class_count" in wanted or "dry_run" in wanted:
+        wanted.add("probe_shapes")  # both read the shape probe's measured shapes
     return [t for t in TOOL_ORDER if t in wanted]

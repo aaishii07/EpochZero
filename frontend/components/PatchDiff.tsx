@@ -4,6 +4,7 @@ import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
 import { useMemo } from "react";
 
 import StatusBadge from "@/components/StatusBadge";
+import { displayStatus } from "@/lib/categories";
 import { defineTheme, EDITOR_OPTIONS, THEME } from "@/lib/monacoTheme";
 import { applyPatch } from "@/lib/patch";
 import type { Suggestion } from "@/lib/types";
@@ -11,12 +12,15 @@ import type { Suggestion } from "@/lib/types";
 interface Props {
   original: string;
   suggestion: Suggestion;
+  // proposed: not applied yet (Accept or Reject); applied: already in the code, shown for review (Undo).
+  mode: "proposed" | "applied";
   onAccept: () => void;
   onReject: () => void;
+  onUndo: () => void;
   onClose: () => void;
 }
 
-export default function PatchDiff({ original, suggestion, onAccept, onReject, onClose }: Props) {
+export default function PatchDiff({ original, suggestion, mode, onAccept, onReject, onUndo, onClose }: Props) {
   const { finding, patch, verify_status, verify_detail, attempts } = suggestion;
   const modified = useMemo(() => {
     if (!patch) return original;
@@ -42,7 +46,8 @@ export default function PatchDiff({ original, suggestion, onAccept, onReject, on
             <span className="shrink-0 font-mono text-xs text-muted">line {finding.line}</span>
           </div>
           <div className="mt-1 flex items-center gap-2 text-xs text-muted">
-            <StatusBadge kind="status" value={verify_status} />
+            <StatusBadge kind="status" value={displayStatus(finding, suggestion)} />
+            {mode === "applied" && <span className="shrink-0 font-medium text-resolved">Applied</span>}
             <span className="truncate">{verify_detail}</span>
             {attempts > 1 && <span className="shrink-0">({attempts} attempts)</span>}
           </div>
@@ -55,6 +60,16 @@ export default function PatchDiff({ original, suggestion, onAccept, onReject, on
           >
             Back to editor
           </button>
+          {mode === "applied" ? (
+            <button
+              type="button"
+              onClick={onUndo}
+              className="h-8 rounded-md border border-line px-3 text-sm text-ink hover:bg-raised"
+            >
+              Undo
+            </button>
+          ) : (
+          <>
           <button
             type="button"
             onClick={onReject}
@@ -74,16 +89,20 @@ export default function PatchDiff({ original, suggestion, onAccept, onReject, on
           >
             {failed ? "Apply anyway" : "Accept"}
           </button>
+          </>
+          )}
         </div>
       </div>
-      {verify_status === "unresolved" && (
+      {mode === "proposed" && verify_status === "unresolved" && (
         <p className="border-b border-line bg-surface px-4 py-2 text-xs text-unresolved">
           This patch did not pass verification. You can still apply it; EpochZero will check the script again.
         </p>
       )}
-      {verify_status === "inconclusive" && (
+      {mode === "proposed" && verify_status === "inconclusive" && (
         <p className="border-b border-line bg-surface px-4 py-2 text-xs text-inconclusive">
-          Unverified: the check could not run on the patched code. Review the change before accepting.
+          {finding.tier === "advisory"
+            ? "Unverified: found by the code review, and no automated check covers this kind of issue. Review the change before accepting."
+            : "Unverified: the check could not run on the patched code. Review the change before accepting."}
         </p>
       )}
       <div className="min-h-0 flex-1">

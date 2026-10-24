@@ -4,6 +4,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
+from road_data import RoadScenes
+
 NUM_CLASSES = 5
 CLASSES = ["road", "car", "person", "building", "sky"]
 

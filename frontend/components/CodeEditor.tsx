@@ -7,22 +7,36 @@ import { useEffect, useRef } from "react";
 import { defineTheme, EDITOR_OPTIONS, THEME } from "@/lib/monacoTheme";
 import type { Finding } from "@/lib/types";
 
+export interface AppliedRange {
+  start: number;
+  end: number;
+  title: string;
+}
+
+export interface Focus {
+  line: number;
+  end: number;
+  nonce: number; // changes on every request, so the same line can be focused twice
+}
+
 interface Props {
   code: string;
   onChange: (code: string) => void;
   findings: Finding[];
+  applied: AppliedRange[];
+  focus: Focus | null;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onRun: () => void;
 }
 
-export default function CodeEditor({ code, onChange, findings, selectedId, onSelect, onRun }: Props) {
+export default function CodeEditor({ code, onChange, findings, applied, focus, selectedId, onSelect, onRun }: Props) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const decorations = useRef<editor.IEditorDecorationsCollection | null>(null);
-  const latest = useRef({ findings, onSelect, onRun });
+  const latest = useRef({ findings, onSelect, onRun, focus });
   useEffect(() => {
-    latest.current = { findings, onSelect, onRun };
+    latest.current = { findings, onSelect, onRun, focus };
   });
 
   const handleMount: OnMount = (ed, monaco) => {
@@ -37,7 +51,18 @@ export default function CodeEditor({ code, onChange, findings, selectedId, onSel
       if (hit) latest.current.onSelect(hit.id);
     });
     applyMarkers();
+    // The editor remounts when the diff view closes; return to the line that was just fixed, not the top.
+    if (latest.current.focus) reveal(latest.current.focus);
   };
+
+  function reveal(f: Focus) {
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (!ed || !model) return;
+    const line = Math.min(Math.max(1, f.line), model.getLineCount());
+    ed.revealLineInCenter(line);
+    ed.setPosition({ lineNumber: line, column: model.getLineFirstNonWhitespaceColumn(line) || 1 });
+  }
 
   function applyMarkers() {
     const ed = editorRef.current;
@@ -65,20 +90,37 @@ export default function CodeEditor({ code, onChange, findings, selectedId, onSel
         }),
     );
     const selected = findings.find((f) => f.id === selectedId);
-    decorations.current?.set(
-      selected && selected.line <= lineCount
-        ? [
-            {
-              range: new monaco.Range(selected.line, 1, Math.min(selected.end_line, lineCount), 1),
-              options: { isWholeLine: true, className: "ez-selected-line", glyphMarginClassName: "ez-selected-glyph" },
-            },
-          ]
-        : [],
-    );
-    if (selected) ed.revealLineInCenterIfOutsideViewport(selected.line);
+    const decos: editor.IModelDeltaDecoration[] = applied
+      .filter((r) => r.start <= lineCount)
+      .map((r) => ({
+        range: new monaco.Range(r.start, 1, Math.min(r.end, lineCount), 1),
+        options: {
+          isWholeLine: true,
+          className: "ez-applied-line",
+          glyphMarginClassName: "ez-applied-glyph",
+          hoverMessage: { value: `Fixed by EpochZero: ${r.title}` },
+        },
+      }));
+    if (selected && selected.line <= lineCount) {
+      decos.push({
+        range: new monaco.Range(selected.line, 1, Math.min(selected.end_line, lineCount), 1),
+        options: { isWholeLine: true, className: "ez-selected-line", glyphMarginClassName: "ez-selected-glyph" },
+      });
+    }
+    decorations.current?.set(decos);
   }
 
   useEffect(applyMarkers);
+
+  useEffect(() => {
+    if (focus) reveal(focus);
+  }, [focus]);
+
+  useEffect(() => {
+    const selected = findings.find((f) => f.id === selectedId);
+    if (selected) editorRef.current?.revealLineInCenterIfOutsideViewport(selected.line);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   return (
     <Editor

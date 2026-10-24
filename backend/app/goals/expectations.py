@@ -31,4 +31,11 @@ EXPECTATIONS: dict[str, dict] = {
         "bad_activations": {"relu"},
         "head_out": "num_classes",
     },
+    "image_to_image": {
+        "losses": {"L1Loss", "MSELoss", "SmoothL1Loss", "HuberLoss", "CharbonnierLoss", "PSNRLoss", "SSIMLoss",
+                   "PerceptualLoss", "L1CharbonnierLoss"},
+        "preferred_loss": "L1Loss",
+        "bad_activations": {"softmax", "log_softmax"},
+        "head_out": None,
+    },
 }

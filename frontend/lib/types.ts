@@ -4,12 +4,18 @@ export type Severity = "error" | "warning" | "info";
 export type Tier = "verified" | "probed" | "advisory";
 export type Impact = "crash" | "silent" | "risk";
 export type VerifyStatus = "resolved" | "unresolved" | "inconclusive" | "not_attempted";
+export type Category =
+  | "syntax" | "python" | "data" | "model" | "pretrained" | "loss" | "optimization" | "training_loop" | "evaluation"
+  | "device" | "checkpointing" | "other";
 
 export interface AnalyzeRequest {
   code: string;
   goal: string;
   input_shape: number[] | null;
   answers: Record<string, string>;
+  // The log's memory: fixes already applied (oldest first) and the previous check's unfixed findings.
+  history: { title: string; rule_id: string; check: number; line: number; before: string[]; after: string[] }[];
+  previous_open: { rule_id: string; title: string; line: number }[];
 }
 
 export interface Evidence {
@@ -28,6 +34,7 @@ export interface DocRef {
 export interface Finding {
   id: string;
   rule_id: string;
+  category: Category;
   title: string;
   message: string;
   severity: Severity;
@@ -73,12 +80,13 @@ export interface Coverage {
 
 export interface GoalProfile {
   task: string;
+  task_name: string;
   num_classes: number | null;
   modality: string;
   notes: string;
 }
 
-export type Phase = "parse" | "context" | "baseline" | "plan" | "repair" | "verify" | "report";
+export type Phase = "parse" | "context" | "baseline" | "plan" | "review" | "repair" | "verify" | "report";
 
 export type AgentEvent =
   | { type: "step"; phase: Phase; message: string }

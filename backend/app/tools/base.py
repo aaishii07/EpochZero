@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.analysis.facts import CodeFacts
-from app.knowledge.docs import RULES
+from app.knowledge.docs import RULE_CATEGORY, RULES
 from app.schemas import Evidence, Finding, GoalProfile, SkippedCheck
 
 
@@ -42,7 +42,7 @@ def is_unknown(answer: str | None) -> bool:
     """True when the developer answered that they do not know (for example "Don't know")."""
     if answer is None:
         return False
-    text = str(answer).strip().lower().replace("'", "").replace("’", "").rstrip(".!")
+    text = str(answer).strip().lower().replace("'", "").replace("\u2019", "").rstrip(".!")
     return text in _UNKNOWN or text.startswith(("i dont know", "dont know", "i do not know"))
 
 
@@ -56,6 +56,7 @@ def make_finding(rule_id: str, title: str, message: str, line: int, evidence: li
         severity=overrides.get("severity", rule["severity"]),
         tier=overrides.get("tier", rule["tier"]),
         impact=overrides.get("impact", rule["impact"]),
+        category=overrides.get("category", RULE_CATEGORY.get(rule_id, "other")),
         line=line,
         end_line=end_line or line,
         evidence=evidence,

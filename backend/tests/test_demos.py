@@ -49,6 +49,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets
+from mnist_data import loader
 
 class FlawedNet(nn.Module):
     def __init__(self):
@@ -112,3 +113,64 @@ def test_single_channel_conv_assumes_28x28_and_marks_probed():
     s = [e.suggestion for e in events if e.type == "suggestion"]
     assert [(x.finding.rule_id, x.finding.tier, x.verify_status) for x in s] == [("EZ001", "probed", "resolved")]
     assert "3136" in s[0].patch.replacement
+
+
+def test_all_syntax_errors_are_listed():
+    from app.agent.orchestrator import collect_syntax_errors
+    code = "import torch\ndef f(:\n    return 1\nx = (1,\ny = 2\nprint 'hi'\n"
+    lines = [line for line, _ in collect_syntax_errors(code)]
+    assert len(lines) >= 2 and lines[0] == 2
+
+
+def test_syntax_error_is_a_finding_not_a_crash():
+    events = list(orchestrator.run(AnalyzeRequest(code="import torch\nmodel = torch.nn.Linear(3, 2\nprint(model)\n")))
+    findings = [e.finding for e in events if e.type == "finding"]
+    assert findings and findings[0].rule_id == "EZ000"
+    assert events[-1].type == "done"
+
+
+def test_pretrained_download_skips_shape_probe_with_reason():
+    code = '''
+import torch
+import torch.nn as nn
+
+class Seg(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = torch.hub.load("facebookresearch/dinov3", "dinov3_vitb16")
+        self.decoder = nn.Conv2d(768, 5, 3)
+
+    def forward(self, x):
+        return self.decoder(self.backbone(x))
+
+model = Seg()
+'''
+    events = list(orchestrator.run(AnalyzeRequest(code=code, goal="5-class segmentation", input_shape=[1, 3, 224, 224])))
+    cov = next(e.coverage for e in events if e.type == "coverage")
+    reason = next(s.reason for s in cov.skipped if s.check == "shape probe")
+    assert "torch.hub.load" in reason
+
+
+def test_review_findings_flow_through_repair(monkeypatch):
+    from app.agent import reviewer
+    from app.schemas import Evidence, Patch
+    from app.tools.base import make_finding
+
+    target = FLAWED.splitlines().index("model = FlawedNet()") + 1
+
+    def fake_review(code, goal, existing, *_):
+        f = make_finding("EZ100", "Weights never loaded", "The checkpoint is created but never loaded.", target,
+                         [Evidence(tool="llm_review", summary="reviewer", lines=[target])], impact="silent")
+        return [(f, Patch(start_line=target, end_line=target, replacement="model = FlawedNet()  # load weights here"))]
+
+    monkeypatch.setattr(config, "LLM_MODE", "live")
+    monkeypatch.setattr(reviewer, "review", fake_review)
+    from app.agent import fixer, goal_reader, planner
+    from app.llm import mock
+    monkeypatch.setattr(goal_reader, "structured", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(planner, "tool_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(fixer, "structured", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline")))
+    events = list(orchestrator.run(AnalyzeRequest(code=FLAWED, goal="10-class digit classification")))
+    s = {x.finding.rule_id: x for x in (e.suggestion for e in events if e.type == "suggestion")}
+    assert s["EZ100"].finding.tier == "advisory" and s["EZ100"].verify_status == "inconclusive"
+    assert s["EZ001"].verify_status == "resolved"

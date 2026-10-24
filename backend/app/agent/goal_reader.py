@@ -17,12 +17,22 @@ TASK_TEXT = {
     "multilabel_classification": "multi-label classification",
     "regression": "regression",
     "segmentation": "segmentation",
+    "image_to_image": "image-to-image",
+    "object_detection": "object detection",
+    "language_modeling": "language modeling",
+    "generation": "generation",
+    "other": "other task",
     "unknown": "unknown task",
 }
+# Tasks whose enum name is coarse; the free-text task_name describes them better when present.
+PREFER_NAME = {"image_to_image", "object_detection", "language_modeling", "generation", "other", "unknown"}
 
 
 def summarize(profile: GoalProfile) -> str:
     """One line that also works as a goal text, for example '10-class image classification'."""
+    name = profile.task_name.strip().rstrip(".")
+    if name and profile.task in PREFER_NAME:
+        return name
     task = TASK_TEXT[profile.task]
     if profile.num_classes and profile.task in {"multiclass_classification", "multilabel_classification", "segmentation"}:
         task = f"{profile.num_classes}-class {task.replace('multi-class ', '')}"
